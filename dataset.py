@@ -27,5 +27,6 @@ def make_dataset(
     return data_tensor
 
 def replace_nan_with_zero(tensor):
-    tensor[tensor != tensor] = 0
+    tensor[np.isnan(tensor)] = 0
+    tensor[np.isinf(tensor)] = 0
     return tensor

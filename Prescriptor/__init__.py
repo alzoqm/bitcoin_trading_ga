@@ -3,3 +3,6 @@ from .prescriptor import (
     ConvFullyBase,
     ChromosomeSelectorModel
 )
+
+from .prescriptor_2 import (CryptoModelTCN
+                               )

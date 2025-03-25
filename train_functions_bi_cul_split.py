@@ -20,26 +20,9 @@ from scipy.stats import skew, kurtosis
 # 전역적으로 기울기 계산 비활성화
 torch.set_grad_enabled(False)
 
-# # 예시 activation 함수 (identity)
-# def activation_fn(x):
-#     return 1 / (1 + torch.exp(-x))
-
-def activation_fn(x: torch.Tensor) -> torch.Tensor:
-    device = x.device
-    # b = ln(4) 를 사용
-    b = torch.log(torch.tensor(4.0, device=device))
-    # 분모: exp(2b)-1
-    denom = torch.exp(b * 2) - 1
-    result = torch.where(
-        x <= -1,
-        torch.tensor(0.0, device=device),
-        torch.where(
-            x >= 1,
-            torch.tensor(1.0, device=device),
-            (torch.exp(b * (x + 1)) - 1) / denom
-        )
-    )
-    return result
+# 예시 activation 함수 (identity)
+def activation_fn(x):
+    return x
 
 def calculate_performance_metrics(returns_list, minimum_date=40):
     """
@@ -133,9 +116,7 @@ def inference(scaled_tensor, scaled_tensor_1d, model, device='cuda:0'):
     dataset = CustomDataset(scaled_tensor, scaled_tensor_1d)
     dataloader = DataLoader(dataset, batch_size=2048, shuffle=False, num_workers=8, pin_memory=True)
     logits = []
-    from tqdm import tqdm
-
-    for data, data_1d in tqdm(dataloader, desc="Inference Progress"):
+    for data, data_1d in dataloader:
         data = data.to(torch.float32).to(device)
         data_1d = data_1d.to(torch.float32).to(device)
         logit = model.base_forward(data, data_1d)
@@ -279,8 +260,7 @@ def calculate_action(
     # ------------------------------------------------
     # 4) 포지션 열기/추가: short
     # ------------------------------------------------
-    # 포지션 오픈 시, short 행동의 확률이 70% 이상인 경우에만 실행
-    open_short_idx = torch.where(currently_hold & short_index & (prob[:, 1] >= 0.7))[0]
+    open_short_idx = torch.where(currently_hold & short_index)[0]
     if len(open_short_idx) > 0:
         pos_list[open_short_idx] = 1
         price_list[open_short_idx] = curr_close
@@ -289,8 +269,7 @@ def calculate_action(
         enter_ratio[open_short_idx] = enter_enter_ratio[open_short_idx]
         additional_count[open_short_idx] = 0
 
-    # 추가 진입 시에도 70% 이상 조건 적용
-    add_short_idx = torch.where(currently_short & short_index & (prob[:, 1] >= 0.7))[0]
+    add_short_idx = torch.where(currently_short & short_index)[0]
     if len(add_short_idx) > 0:
         can_add_idx = add_short_idx[additional_count[add_short_idx] < limit]
         if len(can_add_idx) > 0:
@@ -314,8 +293,7 @@ def calculate_action(
     # ------------------------------------------------
     # 5) 포지션 열기/추가: long
     # ------------------------------------------------
-    # 포지션 오픈 시, long 행동의 확률이 70% 이상인 경우에만 실행
-    open_long_idx = torch.where(currently_hold & long_index & (prob[:, 2] >= 0.7))[0]
+    open_long_idx = torch.where(currently_hold & long_index)[0]
     if len(open_long_idx) > 0:
         pos_list[open_long_idx] = 2
         price_list[open_long_idx] = curr_close
@@ -324,8 +302,7 @@ def calculate_action(
         enter_ratio[open_long_idx] = enter_enter_ratio[open_long_idx]
         additional_count[open_long_idx] = 0
 
-    # 추가 진입 시에도 70% 이상 조건 적용
-    add_long_idx = torch.where(currently_long & long_index & (prob[:, 2] >= 0.7))[0]
+    add_long_idx = torch.where(currently_long & long_index)[0]
     if len(add_long_idx) > 0:
         can_add_idx = add_long_idx[additional_count[add_long_idx] < limit]
         if len(can_add_idx) > 0:
@@ -416,7 +393,7 @@ def after_forward(model, prob, now_profit, leverage_ratio, enter_ratio, pos_list
     mapped_array = pos_list
     step = torch.arange(0, ch_size * 3, step=3, device=device)
 
-    x = torch.cat([prob, now_profit_tensor / 10, leverage_ratio_tensor / 125, enter_ratio_tensor], dim=1)
+    x = torch.cat([prob, now_profit_tensor, leverage_ratio_tensor, enter_ratio_tensor], dim=1)
     cate_x = mapped_array + step
 
     x = x.to(torch.float32).to(device)
@@ -424,6 +401,198 @@ def after_forward(model, prob, now_profit, leverage_ratio, enter_ratio, pos_list
 
     after_output = model.after_forward(x=x.squeeze(dim=0), x_cate=cate_x)
     return after_output.squeeze(dim=0)
+
+def fitness_fn(prescriptor, data, probs, entry_index_list, entry_pos_list, skip_data_cnt, start_data_cnt, chromosomes_size, window_size,
+                      alpha=1., cut_percent=90., device='cpu', stop_cnt=1e9, profit_init=10, limit=4, minimum_date=40):
+    """
+    수정된 fitness_fn 함수  
+    - 매 시점마다 profit 값을 즉시 누적 통계(aggregated statistics)에 업데이트하여 returns_list를 누적하지 않습니다.
+    - 롱 거래와 숏 거래에 대해 별도 누적 통계를 계산한 후, 최종 메트릭은 (long_metric + short_metric) / 2로 산출합니다.
+    - profit_factor 계산 시, 손실이 0인데 수익만 발생한 경우 profit_factor는 15로 고정합니다.
+    """
+    pos_list = torch.zeros(chromosomes_size, dtype=torch.long, device=device)  # 0: hold
+    price_list = torch.full((chromosomes_size,), -1.0, dtype=torch.float32, device=device)
+    leverage_ratio = torch.full((chromosomes_size,), -1, dtype=torch.int, device=device)
+    enter_ratio = torch.full((chromosomes_size,), -1.0, dtype=torch.float32, device=device)
+    profit = torch.zeros((chromosomes_size,), dtype=torch.float32, device=device)
+    additional_count = torch.zeros(chromosomes_size, dtype=torch.long, device=device)
+    holding_period = torch.zeros(chromosomes_size, dtype=torch.long, device=device)
+    
+    # 롱 거래에 대한 누적 통계
+    long_sum_returns = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    long_count_returns = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
+    long_sum_sq_returns = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    long_total_profit_agg = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    long_total_loss_agg = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    long_count_wins = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
+    long_cum_sum = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    long_running_max = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    long_max_drawdown = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    long_compound_value = torch.ones(chromosomes_size, device=device, dtype=torch.float32)
+    
+    # 숏 거래에 대한 누적 통계
+    short_sum_returns = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    short_count_returns = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
+    short_sum_sq_returns = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    short_total_profit_agg = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    short_total_loss_agg = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    short_count_wins = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
+    short_cum_sum = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    short_running_max = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    short_max_drawdown = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    short_compound_value = torch.ones(chromosomes_size, device=device, dtype=torch.float32)
+    
+    entry_pos_mapping = {'hold': 0, 'short': 1, 'long': 2}
+    entry_pos_list_int = [entry_pos_mapping[ep] for ep in entry_pos_list]
+    
+    before_index = 0
+
+    for data_cnt, (entry_index, entry_pos) in tqdm(enumerate(zip(entry_index_list, entry_pos_list_int)),
+                                                   total=len(entry_pos_list_int)):
+        if data_cnt >= stop_cnt:
+            break
+        if data_cnt < start_data_cnt:
+            continue
+
+        entry_pos = torch.tensor(entry_pos).long()
+        x = data.iloc[entry_index]
+        curr_open = torch.tensor(x['Open'], dtype=torch.float32, device=device)
+        curr_close = torch.tensor(x['Close'], dtype=torch.float32, device=device)
+        curr_high = torch.tensor(x['High'], dtype=torch.float32, device=device)
+        curr_low = torch.tensor(x['Low'], dtype=torch.float32, device=device)
+        upper = torch.tensor(x[f'Upper_BB_{window_size}'], dtype=torch.float32, device=device)
+        lower = torch.tensor(x[f'Lower_BB_{window_size}'], dtype=torch.float32, device=device)
+        
+        history_x = data.iloc[before_index+1:entry_index+1]
+        history_high = torch.tensor(history_x['High'].max(), dtype=torch.float32, device=device)
+        history_low = torch.tensor(history_x['Low'].min(), dtype=torch.float32, device=device)
+        
+        # --------------------------------------------
+        # 현재 시점 전의 포지션 상태를 old_pos로 기록 (롱/숏 거래 구분에 사용)
+        old_pos = pos_list.clone()
+        # --------------------------------------------
+        
+        pos_list, price_list, leverage_ratio, enter_ratio, additional_count, profit = loss_cut_fn(
+            pos_list, price_list, leverage_ratio,
+            enter_ratio, profit, history_low, history_high,
+            additional_count, alpha, cut_percent
+        )
+        
+        prob = torch.tensor(probs[:, data_cnt - skip_data_cnt]).float().to(device)
+        now_profit = calculate_now_profit(pos_list, price_list, leverage_ratio, enter_ratio, curr_close)
+        prob = after_forward(prescriptor, prob, now_profit, leverage_ratio, enter_ratio, pos_list, device=device)
+        
+        pos_list, price_list, leverage_ratio, enter_ratio, additional_count, profit = calculate_action(
+            prob, pos_list, price_list, leverage_ratio, enter_ratio,
+            profit, curr_close, additional_count,
+            limit=limit, min_enter_ratio=0.05
+        )
+        
+        holding_period[pos_list != 0] += 1
+        holding_period[pos_list == 0] = 0
+
+        pos_list, price_list, leverage_ratio, enter_ratio, additional_count, profit, holding_period = time_based_exit_fn(
+            pos_list,
+            price_list,
+            leverage_ratio,
+            enter_ratio,
+            additional_count,
+            profit,
+            curr_close,
+            holding_period,
+            max_holding_bars=50,
+            device=device
+        )
+        
+        # --------------------------------------------
+        # 거래 종료(청산 혹은 반대전환)한 경우 old_pos와 현재 pos_list가 달라짐.
+        # 이를 이용해 롱/숏 거래 별로 누적 통계를 업데이트.
+        closed_mask = (old_pos != pos_list) & (old_pos != 0)
+        long_closed_mask = closed_mask & (old_pos == 2)
+        short_closed_mask = closed_mask & (old_pos == 1)
+        
+        if long_closed_mask.any():
+            long_sum_returns += profit * long_closed_mask.float()
+            long_count_returns += long_closed_mask.int()
+            long_sum_sq_returns += (profit ** 2) * long_closed_mask.float()
+            long_wins = (profit > 0) & long_closed_mask
+            long_total_profit_agg += profit * long_wins.float()
+            long_total_loss_agg += (-profit) * ((profit < 0) & long_closed_mask).float()
+            long_count_wins += long_wins.int()
+            long_cum_sum += profit * long_closed_mask.float()
+            long_running_max = torch.max(long_running_max, long_cum_sum)
+            current_drawdown = long_running_max - long_cum_sum
+            long_max_drawdown = torch.max(long_max_drawdown, current_drawdown)
+            long_compound_value *= torch.where(long_closed_mask, (1 + profit/100.0), torch.ones_like(profit))
+        
+        if short_closed_mask.any():
+            short_sum_returns += profit * short_closed_mask.float()
+            short_count_returns += short_closed_mask.int()
+            short_sum_sq_returns += (profit ** 2) * short_closed_mask.float()
+            short_wins = (profit > 0) & short_closed_mask
+            short_total_profit_agg += profit * short_wins.float()
+            short_total_loss_agg += (-profit) * ((profit < 0) & short_closed_mask).float()
+            short_count_wins += short_wins.int()
+            short_cum_sum += profit * short_closed_mask.float()
+            short_running_max = torch.max(short_running_max, short_cum_sum)
+            current_drawdown_short = short_running_max - short_cum_sum
+            short_max_drawdown = torch.max(short_max_drawdown, current_drawdown_short)
+            short_compound_value *= torch.where(short_closed_mask, (1 + profit/100.0), torch.ones_like(profit))
+        # --------------------------------------------
+        
+        before_index = entry_index
+        profit = torch.zeros(chromosomes_size, dtype=torch.float32, device=device)
+    
+    # 롱 거래 메트릭 계산
+    long_mean_returns = torch.where(long_count_returns.float() > 0, long_sum_returns / long_count_returns.float(), torch.full_like(long_sum_returns, -1e9))
+    long_profit_factor = torch.where(
+        long_total_loss_agg > 0,
+        long_total_profit_agg / (long_total_loss_agg + 1e-9),
+        torch.where(long_total_profit_agg > 0, torch.full_like(long_total_profit_agg, 15.0), torch.full_like(long_total_profit_agg, -1e9))
+    )
+    long_win_rate = torch.where(long_count_returns.float() > 0, long_count_wins.float() / long_count_returns.float(), torch.full_like(long_count_returns.float(), -1e9))
+    
+    # 숏 거래 메트릭 계산
+    short_mean_returns = torch.where(short_count_returns.float() > 0, short_sum_returns / short_count_returns.float(), torch.full_like(short_sum_returns, -1e9))
+    short_profit_factor = torch.where(
+        short_total_loss_agg > 0,
+        short_total_profit_agg / (short_total_loss_agg + 1e-9),
+        torch.where(short_total_profit_agg > 0, torch.full_like(short_total_profit_agg, 15.0), torch.full_like(short_total_profit_agg, -1e9))
+    )
+    short_win_rate = torch.where(short_count_returns.float() > 0, short_count_wins.float() / short_count_returns.float(), torch.full_like(short_count_returns.float(), -1e9))
+    
+    # 최소 거래 수 미달인 경우 처리
+    long_invalid = long_count_returns < minimum_date
+    short_invalid = short_count_returns < minimum_date
+    
+    long_mean_returns[long_invalid] = -1e9
+    long_profit_factor[long_invalid] = -1e9
+    long_win_rate[long_invalid] = -1e9
+    long_max_drawdown[long_invalid] = 1e9
+    long_compound_value[long_invalid] = -1e9
+
+    short_mean_returns[short_invalid] = -1e9
+    short_profit_factor[short_invalid] = -1e9
+    short_win_rate[short_invalid] = -1e9
+    short_max_drawdown[short_invalid] = 1e9
+    short_compound_value[short_invalid] = -1e9
+
+    # 최종 메트릭은 롱 메트릭과 숏 메트릭의 평균으로 계산
+    final_mean_returns = (long_mean_returns + short_mean_returns) / 2
+    final_profit_factor = (long_profit_factor + short_profit_factor) / 2
+    final_win_rate = (long_win_rate + short_win_rate) / 2
+    final_max_drawdown = (long_max_drawdown + short_max_drawdown) / 2
+    final_compound_value = (long_compound_value + short_compound_value) / 2
+    
+    metrics = torch.stack(
+        [final_mean_returns, final_profit_factor, final_win_rate, final_max_drawdown, final_compound_value], 
+        dim=1
+    )
+    return metrics.cpu().numpy()
+
+def get_chromosome_key(chromosome):
+    quantized_chrom = np.round(chromosome.cpu().numpy(), decimals=6)
+    return tuple(quantized_chrom.flatten())
 
 def calculate_fitness(metrics):
     chromosomes_size = len(metrics)
@@ -470,189 +639,6 @@ def calculate_fitness(metrics):
     fitness_values[metrics[:, 0] == -1e9] = -1e9
 
     return fitness_values
-
-def fitness_fn(prescriptor, data, probs, entry_index_list, entry_pos_list, skip_data_cnt, start_data_cnt, chromosomes_size, window_size,
-               alpha=1., cut_percent=90., device='cpu', stop_cnt=1e9, profit_init=10, limit=4, minimum_date=40):
-    """
-    수정된 fitness_fn 함수  
-    - 매 시점마다 profit 값을 즉시 누적 통계(aggregated statistics)에 업데이트하여 returns_list를 누적하지 않습니다.
-    - 최종적으로 각 chromosome별 성과 지표(metrics)를 계산하여 numpy array로 반환합니다.
-    - 매 스텝마다 tracking_info 딕셔너리에 관련 정보를 저장하여 리턴합니다.
-    """
-    pos_list = torch.zeros(chromosomes_size, dtype=torch.long, device=device)  # 0: hold
-    price_list = torch.full((chromosomes_size,), -1.0, dtype=torch.float32, device=device)
-    leverage_ratio = torch.full((chromosomes_size,), -1, dtype=torch.int, device=device)
-    enter_ratio = torch.full((chromosomes_size,), -1.0, dtype=torch.float32, device=device)
-    profit = torch.zeros((chromosomes_size,), dtype=torch.float32, device=device)
-    additional_count = torch.zeros(chromosomes_size, dtype=torch.long, device=device)
-    holding_period = torch.zeros((chromosomes_size,), dtype=torch.long, device=device)
-    
-    # 누적 통계를 위한 변수들
-    sum_returns = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
-    count_returns = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
-    sum_sq_returns = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
-    
-    sum_neg = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
-    count_neg = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
-    sum_sq_neg = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
-    
-    total_profit_agg = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
-    total_loss_agg = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
-    
-    count_wins = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
-    
-    cum_sum = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
-    running_max = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
-    max_drawdown = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
-    
-    compound_value = torch.ones(chromosomes_size, device=device, dtype=torch.float32)
-    
-    risk_free_rate = 0.0
-    
-    entry_pos_mapping = {'hold': 0, 'short': 1, 'long': 2}
-    entry_pos_list_int = [entry_pos_mapping[ep] for ep in entry_pos_list]
-    
-    before_index = 0
-
-    # tracking_info 딕셔너리 초기화
-    tracking_info = {
-        'iteration': [],
-        'pos_list': [],
-        'price_list': [],
-        'leverage_ratio': [],
-        'enter_ratio': [],
-        'profit': [],
-        'additional_count': [],
-        'now_profit': [],
-        'cumulative_returns': []  # compound_value를 누적 수익률로 사용
-    }
-    
-    for data_cnt, (entry_index, entry_pos) in tqdm(enumerate(zip(entry_index_list, entry_pos_list_int)),
-                                                   total=len(entry_pos_list_int)):
-        if data_cnt >= stop_cnt:
-            break
-        if data_cnt < start_data_cnt:
-            continue
-
-        entry_pos = torch.tensor(entry_pos).long()
-        x = data.iloc[entry_index]
-        curr_open = torch.tensor(x['Open'], dtype=torch.float32, device=device)
-        curr_close = torch.tensor(x['Close'], dtype=torch.float32, device=device)
-        curr_high = torch.tensor(x['High'], dtype=torch.float32, device=device)
-        curr_low = torch.tensor(x['Low'], dtype=torch.float32, device=device)
-        upper = torch.tensor(x[f'Upper_BB_{window_size}'], dtype=torch.float32, device=device)
-        lower = torch.tensor(x[f'Lower_BB_{window_size}'], dtype=torch.float32, device=device)
-        
-        history_x = data.iloc[before_index+1:entry_index+1]
-        history_high = torch.tensor(history_x['High'].max(), dtype=torch.float32, device=device)
-        history_low = torch.tensor(history_x['Low'].min(), dtype=torch.float32, device=device)
-        
-        pos_list, price_list, leverage_ratio, enter_ratio, additional_count, profit = loss_cut_fn(
-            pos_list, price_list, leverage_ratio,
-            enter_ratio, profit, history_low, history_high,
-            additional_count, alpha, cut_percent
-        )
-        
-        prob = torch.tensor(probs[:, data_cnt - skip_data_cnt]).float().to(device)
-        now_profit = calculate_now_profit(pos_list, price_list, leverage_ratio, enter_ratio, curr_close)
-        prob = after_forward(prescriptor, prob, now_profit, leverage_ratio, enter_ratio, pos_list, device=device)
-        
-        pos_list, price_list, leverage_ratio, enter_ratio, additional_count, profit = calculate_action(
-            prob, pos_list, price_list, leverage_ratio, enter_ratio,
-            profit, curr_close, additional_count,
-            limit=limit, min_enter_ratio=0.1
-        )
-        
-        holding_period[pos_list != 0] += 1
-        holding_period[pos_list == 0] = 0
-
-        pos_list, price_list, leverage_ratio, enter_ratio, additional_count, profit, holding_period = time_based_exit_fn(
-            pos_list,
-            price_list,
-            leverage_ratio,
-            enter_ratio,
-            additional_count,
-            profit,
-            curr_close,
-            holding_period,
-            max_holding_bars=100,
-            device=device
-        )
-        
-        # profit 값(이번 시점의 각 chromosome의 손익)을 누적 통계에 업데이트
-        non_zero_mask = profit != 0
-        sum_returns[non_zero_mask] += profit[non_zero_mask]
-        count_returns[non_zero_mask] += 1
-        sum_sq_returns[non_zero_mask] += profit[non_zero_mask] ** 2
-        
-        neg_mask = profit < 0
-        sum_neg[neg_mask] += profit[neg_mask]
-        count_neg[neg_mask] += 1
-        sum_sq_neg[neg_mask] += profit[neg_mask] ** 2
-        
-        pos_mask = profit > 0
-        total_profit_agg[pos_mask] += profit[pos_mask]
-        total_loss_agg[neg_mask] += -profit[neg_mask]
-        
-        count_wins[pos_mask] += 1
-        
-        cum_sum = cum_sum + profit
-        running_max = torch.maximum(running_max, cum_sum)
-        current_drawdown = running_max - cum_sum
-        max_drawdown = torch.maximum(max_drawdown, current_drawdown)
-        
-        compound_value[non_zero_mask] = compound_value[non_zero_mask] * (1 + profit[non_zero_mask] / 100.0)
-        
-        # tracking_info 업데이트 (각 텐서를 cpu로 옮겨 numpy 또는 list 형태로 저장)
-        tracking_info['iteration'].append(data_cnt)
-        tracking_info['pos_list'].append(pos_list.cpu().numpy().tolist())
-        tracking_info['price_list'].append(price_list.cpu().numpy().tolist())
-        tracking_info['leverage_ratio'].append(leverage_ratio.cpu().numpy().tolist())
-        tracking_info['enter_ratio'].append(enter_ratio.cpu().numpy().tolist())
-        tracking_info['profit'].append(profit.cpu().numpy().tolist())
-        tracking_info['additional_count'].append(additional_count.cpu().numpy().tolist())
-        tracking_info['now_profit'].append(now_profit.cpu().numpy().tolist())
-        tracking_info['cumulative_returns'].append(compound_value.cpu().numpy().tolist())
-        
-        before_index = entry_index
-        profit = torch.zeros(chromosomes_size, dtype=torch.float32, device=device)
-    
-    count_returns_f = count_returns.float()
-    mean_returns = torch.where(
-        count_returns_f > 0, 
-        sum_returns / count_returns_f, 
-        torch.full_like(sum_returns, -1e9)
-    )
-    
-    profit_factors = torch.where(
-        total_loss_agg > 0, 
-        total_profit_agg / (total_loss_agg + 1e-9), 
-        torch.full_like(total_profit_agg, -1e9)
-    )
-    
-    win_rates = torch.where(
-        count_returns_f > 0, 
-        count_wins.float() / count_returns_f, 
-        torch.full_like(count_returns_f, -1e9)
-    )
-    
-    invalid_mask = count_returns < minimum_date
-    mean_returns[invalid_mask] = -1e9
-    profit_factors[invalid_mask] = -1e9
-    win_rates[invalid_mask] = -1e9
-    max_drawdown[invalid_mask] = 1e9
-    compound_value[invalid_mask] = -1e9
-    
-    metrics = torch.stack(
-        [mean_returns, profit_factors, win_rates, max_drawdown, compound_value], 
-        dim=1
-    )
-    # metrics와 tracking_info 모두 반환
-    return metrics.cpu().numpy(), tracking_info
-
-def get_chromosome_key(chromosome):
-    quantized_chrom = np.round(chromosome.cpu().numpy(), decimals=6)
-    return tuple(quantized_chrom.flatten())
 
 def generation_valid(data_1m, dataset_1m, dataset_1d, prescriptor, evolution,
                      skip_data_cnt, valid_skip_data_cnt, test_skip_data_cnt, chromosomes_size,
@@ -711,8 +697,8 @@ def generation_valid(data_1m, dataset_1m, dataset_1d, prescriptor, evolution,
                 )
                 
                 valid_metrics = torch.from_numpy(valid_metrics[:elite_size])
-                valid_index = np.where((train_metrics[:elite_size][:, 4] > 3.0) & 
-                                       (train_metrics[:elite_size][:, 3] < 60))[0]
+                valid_index = np.where((train_metrics[:elite_size][:, 4] > 1.5) & 
+                                       (train_metrics[:elite_size][:, 2] > 0.5))[0]
                 valid_metrics = valid_metrics[valid_index]
                 
                 if best_profit is None:
@@ -763,7 +749,7 @@ def generation_test(data_1m, dataset_1m, dataset_1d, prescriptor, skip_data_cnt,
     probs = torch.concat(probs, dim=1)
     probs = probs.squeeze(dim=2)
     
-    profit,  tracking_info= fitness_fn(
+    profit = fitness_fn(
         prescriptor=prescriptor,
         data=data_1m,
         probs=probs,
@@ -781,4 +767,4 @@ def generation_test(data_1m, dataset_1m, dataset_1d, prescriptor, skip_data_cnt,
         limit=4
     )
         
-    return profit, tracking_info
+    return profit

@@ -135,6 +135,40 @@ def BB_MACD_fitness_fn(data, window_size=240, short_window_size=20, long_window_
         patience_list.append(patience)
 
     return entry_pos_list, patience_list, index_list
+
+def simple_fitness_fn(data, window_size=240, short_window_size=20, long_window_size=60):
+    entry_pos_list = []
+    patience_list = []
+    index_list = []
+    patience = 0
+    before_pos = 'hold'
+    counter = 0  # 반복 횟수를 센다.
+
+    for index, x in tqdm(data.iterrows(), total=len(data)):
+        counter += 1
+
+        # 10번째마다 매수 포인트 생성, 나머지는 'hold'
+        if counter % 20 == 0:
+            entry_pos = 'long'
+        else:
+            entry_pos = 'hold'
+        entry_pos_list.append(entry_pos)
+
+        # 연속 'long' 상태의 경우 patience 증가, 새 매수 신호가 아니면 0으로 초기화
+        if entry_pos == 'long':
+            if before_pos == 'long':
+                patience += 1
+            else:
+                patience = 0
+            before_pos = entry_pos
+            index_list.append(index)
+        else:
+            # 'hold'인 경우, 특별한 처리 없이 그대로 둔다.
+            pass
+
+        patience_list.append(patience)
+
+    return entry_pos_list, patience_list, index_list
     
 def BB_fitness_fn(data, window_size=240):
     bb_str = BBStrategy()

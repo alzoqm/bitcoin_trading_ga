@@ -164,6 +164,10 @@ class Evolution:
         offspring = self.crossover(parents)
         offspring = self.mutation(offspring)
 
+        # print(offspring.shape)
+
         chromosomes = torch.concat([elite_chromosomes, offspring])
+        chromosomes = chromosomes.squeeze(dim=0)
+        
         self.update_chromosomes(chromosomes, base_ch_shape, after_ch_shape, device)
 
