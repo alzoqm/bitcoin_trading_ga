@@ -20,9 +20,26 @@ from scipy.stats import skew, kurtosis
 # 전역적으로 기울기 계산 비활성화
 torch.set_grad_enabled(False)
 
-# 예시 activation 함수 (identity)
-def activation_fn(x):
-    return x
+# # 예시 activation 함수 (identity)
+# def activation_fn(x):
+#     return 1 / (1 + torch.exp(-x))
+
+def activation_fn(x: torch.Tensor) -> torch.Tensor:
+    device = x.device
+    # b = ln(4) 를 사용
+    b = torch.log(torch.tensor(4.0, device=device))
+    # 분모: exp(2b)-1
+    denom = torch.exp(b * 2) - 1
+    result = torch.where(
+        x <= -1,
+        torch.tensor(0.0, device=device),
+        torch.where(
+            x >= 1,
+            torch.tensor(1.0, device=device),
+            (torch.exp(b * (x + 1)) - 1) / denom
+        )
+    )
+    return result
 
 def calculate_performance_metrics(returns_list, minimum_date=40):
     """
@@ -102,26 +119,53 @@ def calculate_performance_metrics(returns_list, minimum_date=40):
     return metrics
 
 class CustomDataset(Dataset):
-    def __init__(self, data, data_1d):
+    def __init__(self, data):
         self.data = data
-        self.data_1d = data_1d
+
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        return self.data[idx], self.data_1d[idx]
+        return self.data[idx]
 
-def inference(scaled_tensor, scaled_tensor_1d, model, device='cuda:0'):
-    dataset = CustomDataset(scaled_tensor, scaled_tensor_1d)
-    dataloader = DataLoader(dataset, batch_size=2048, shuffle=False, num_workers=8, pin_memory=True)
-    logits = []
-    for data, data_1d in dataloader:
+# def inference(scaled_tensor, model, device='cuda:0'):
+#     dataset = CustomDataset(scaled_tensor)
+#     dataloader = DataLoader(dataset, batch_size=2048, shuffle=False, num_workers=8, pin_memory=True)
+#     logits = []
+#     from tqdm import tqdm
+
+#     for data in tqdm(dataloader, desc="Inference Progress"):
+#         data = data.to(torch.float32).to(device)
+#         logit = model.base_forward(data).permute(1, 0, 2).half().cpu()
+#         logits.append(logit)
+#     return logits
+
+def inference(scaled_tensor, model, device='cuda:0'):
+    dataset = CustomDataset(scaled_tensor)
+    dataloader = DataLoader(dataset, batch_size=128, shuffle=False, num_workers=8, pin_memory=True)
+    
+    # 최종 결과 텐서 크기를 미리 계산 (예: (feature_dim, total_seq_len, other_dim))
+    # 예시로 첫 배치에서 logit shape을 확인
+    sample_data = next(iter(dataloader)).to(torch.float32).to(device)
+    sample_logit = model.base_forward(sample_data).permute(1, 0, 2).half().cpu()
+    total_seq_len = sample_logit.shape[1] * len(dataloader)
+    
+    # 최종 텐서 shape : (feature_dim, total_seq_len, other_dim)
+    final_shape = (sample_logit.shape[0], total_seq_len, sample_logit.shape[2])
+    final_logits = torch.empty(final_shape, dtype=sample_logit.dtype)
+    
+    start_idx = 0
+    from tqdm import tqdm
+    for data in tqdm(dataloader, desc="Inference Progress"):
         data = data.to(torch.float32).to(device)
-        data_1d = data_1d.to(torch.float32).to(device)
-        logit = model.base_forward(data, data_1d)
-        logits.append(logit)
-    return logits
+        logit = model.base_forward(data).permute(1, 0, 2).half().cpu()
+        batch_seq_len = logit.shape[1]
+        final_logits[:, start_idx:start_idx+batch_seq_len, :] = logit
+        start_idx += batch_seq_len
+    
+    return final_logits
+
 
 def loss_cut_fn(pos_list, price_list, leverage_ratio, enter_ratio, profit, curr_low, curr_high, additional_count, alpha=1., cut_percent=80.):
     # 포지션: short -> 1, long -> 2, hold -> 0
@@ -260,7 +304,8 @@ def calculate_action(
     # ------------------------------------------------
     # 4) 포지션 열기/추가: short
     # ------------------------------------------------
-    open_short_idx = torch.where(currently_hold & short_index)[0]
+    # 포지션 오픈 시, short 행동의 확률이 70% 이상인 경우에만 실행
+    open_short_idx = torch.where(currently_hold & short_index & (prob[:, 1] >= 0.7))[0]
     if len(open_short_idx) > 0:
         pos_list[open_short_idx] = 1
         price_list[open_short_idx] = curr_close
@@ -269,7 +314,8 @@ def calculate_action(
         enter_ratio[open_short_idx] = enter_enter_ratio[open_short_idx]
         additional_count[open_short_idx] = 0
 
-    add_short_idx = torch.where(currently_short & short_index)[0]
+    # 추가 진입 시에도 70% 이상 조건 적용
+    add_short_idx = torch.where(currently_short & short_index & (prob[:, 1] >= 0.7))[0]
     if len(add_short_idx) > 0:
         can_add_idx = add_short_idx[additional_count[add_short_idx] < limit]
         if len(can_add_idx) > 0:
@@ -293,7 +339,8 @@ def calculate_action(
     # ------------------------------------------------
     # 5) 포지션 열기/추가: long
     # ------------------------------------------------
-    open_long_idx = torch.where(currently_hold & long_index)[0]
+    # 포지션 오픈 시, long 행동의 확률이 70% 이상인 경우에만 실행
+    open_long_idx = torch.where(currently_hold & long_index & (prob[:, 2] >= 0.7))[0]
     if len(open_long_idx) > 0:
         pos_list[open_long_idx] = 2
         price_list[open_long_idx] = curr_close
@@ -302,7 +349,8 @@ def calculate_action(
         enter_ratio[open_long_idx] = enter_enter_ratio[open_long_idx]
         additional_count[open_long_idx] = 0
 
-    add_long_idx = torch.where(currently_long & long_index)[0]
+    # 추가 진입 시에도 70% 이상 조건 적용
+    add_long_idx = torch.where(currently_long & long_index & (prob[:, 2] >= 0.7))[0]
     if len(add_long_idx) > 0:
         can_add_idx = add_long_idx[additional_count[add_long_idx] < limit]
         if len(can_add_idx) > 0:
@@ -393,7 +441,7 @@ def after_forward(model, prob, now_profit, leverage_ratio, enter_ratio, pos_list
     mapped_array = pos_list
     step = torch.arange(0, ch_size * 3, step=3, device=device)
 
-    x = torch.cat([prob, now_profit_tensor, leverage_ratio_tensor, enter_ratio_tensor], dim=1)
+    x = torch.cat([prob, now_profit_tensor / 10, leverage_ratio_tensor / 125, enter_ratio_tensor], dim=1)
     cate_x = mapped_array + step
 
     x = x.to(torch.float32).to(device)
@@ -424,8 +472,6 @@ def calculate_fitness(metrics):
 
     higher_is_better_list = [
         True,   # mean_returns
-        True,   # sharpe_ratios
-        True,   # sortino_ratios
         True,   # profit_factors
         True,   # win_rates
         False,  # max_drawdowns
@@ -436,19 +482,11 @@ def calculate_fitness(metrics):
 
     weights = [
         0.1,   # mean_returns
-        0.05,  # sharpe_ratios
-        0.05,  # sortino_ratios
-        0.05,  # profit_factors
+        0.2,  # profit_factors
         0.15,  # win_rates
-        0.1,   # max_drawdowns
-        0.6    # cumulative_returns
-        # 0.0,   # mean_returns
-        # 0.0,   # sharpe_ratios
-        # 0.0,   # sortino_ratios
-        # 0.0,   # profit_factors
-        # 0.0,   # win_rates
-        # 0.0,   # max_drawdowns
-        # 1.0    # cumulative_returns
+        0.15,   # max_drawdowns
+        0.4    # cumulative_returns
+
     ]
     fitness_values = np.zeros(chromosomes_size)
     for index in range(len(weights)):
@@ -509,12 +547,8 @@ def fitness_fn(prescriptor, data, probs, entry_index_list, entry_pos_list, skip_
 
         entry_pos = torch.tensor(entry_pos).long()
         x = data.iloc[entry_index]
-        curr_open = torch.tensor(x['Open'], dtype=torch.float32, device=device)
         curr_close = torch.tensor(x['Close'], dtype=torch.float32, device=device)
-        curr_high = torch.tensor(x['High'], dtype=torch.float32, device=device)
-        curr_low = torch.tensor(x['Low'], dtype=torch.float32, device=device)
-        upper = torch.tensor(x[f'Upper_BB_{window_size}'], dtype=torch.float32, device=device)
-        lower = torch.tensor(x[f'Lower_BB_{window_size}'], dtype=torch.float32, device=device)
+
         
         history_x = data.iloc[before_index+1:entry_index+1]
         history_high = torch.tensor(history_x['High'].max(), dtype=torch.float32, device=device)
@@ -533,7 +567,7 @@ def fitness_fn(prescriptor, data, probs, entry_index_list, entry_pos_list, skip_
         pos_list, price_list, leverage_ratio, enter_ratio, additional_count, profit = calculate_action(
             prob, pos_list, price_list, leverage_ratio, enter_ratio,
             profit, curr_close, additional_count,
-            limit=limit, min_enter_ratio=0.05
+            limit=limit, min_enter_ratio=0.1
         )
         
         holding_period[pos_list != 0] += 1
@@ -585,27 +619,7 @@ def fitness_fn(prescriptor, data, probs, entry_index_list, entry_pos_list, skip_
         sum_returns / count_returns_f, 
         torch.full_like(sum_returns, -1e9)
     )
-    variance_returns = torch.where(
-        count_returns_f > 0,
-        sum_sq_returns / count_returns_f - mean_returns ** 2,
-        torch.zeros_like(sum_returns)
-    )
-    std_returns = torch.sqrt(variance_returns + 1e-9)
-    sharpe_ratios = torch.where(
-        std_returns > 0, 
-        (mean_returns - risk_free_rate) / std_returns, 
-        torch.full_like(mean_returns, -1e9)
-    )
-    
-    count_neg_f = count_neg.float()
-    mean_neg = torch.where(count_neg_f > 0, sum_neg / count_neg_f, torch.zeros_like(sum_neg))
-    variance_neg = torch.where(count_neg_f > 0, sum_sq_neg / count_neg_f - mean_neg ** 2, torch.zeros_like(sum_neg))
-    std_neg = torch.sqrt(variance_neg + 1e-9)
-    sortino_ratios = torch.where(
-        std_neg > 0, 
-        (mean_returns - risk_free_rate) / std_neg, 
-        torch.full_like(mean_returns, -1e9)
-    )
+
     
     profit_factors = torch.where(
         total_loss_agg > 0, 
@@ -621,15 +635,15 @@ def fitness_fn(prescriptor, data, probs, entry_index_list, entry_pos_list, skip_
     
     invalid_mask = count_returns < minimum_date
     mean_returns[invalid_mask] = -1e9
-    sharpe_ratios[invalid_mask] = -1e9
-    sortino_ratios[invalid_mask] = -1e9
+    # sharpe_ratios[invalid_mask] = -1e9
+    # sortino_ratios[invalid_mask] = -1e9
     profit_factors[invalid_mask] = -1e9
     win_rates[invalid_mask] = -1e9
     max_drawdown[invalid_mask] = 1e9
     compound_value[invalid_mask] = -1e9
     
     metrics = torch.stack(
-        [mean_returns, sharpe_ratios, sortino_ratios, profit_factors, win_rates, max_drawdown, compound_value], 
+        [mean_returns, profit_factors, win_rates, max_drawdown, compound_value], 
         dim=1
     )
     return metrics.cpu().numpy()
@@ -638,7 +652,7 @@ def get_chromosome_key(chromosome):
     quantized_chrom = np.round(chromosome.cpu().numpy(), decimals=6)
     return tuple(quantized_chrom.flatten())
 
-def generation_valid(data_1m, dataset_1m, dataset_1d, prescriptor, evolution,
+def generation_valid(data_1m, dataset_1m, prescriptor, evolution,
                      skip_data_cnt, valid_skip_data_cnt, test_skip_data_cnt, chromosomes_size,
                      window_size, gen_loop, best_size, elite_size, profit_init, 
                      entry_index_list=None, entry_pos_list=None,
@@ -653,9 +667,8 @@ def generation_valid(data_1m, dataset_1m, dataset_1d, prescriptor, evolution,
     for gen_idx in range(start_gen, gen_loop):
         print(f'generation  {gen_idx}: ')
 
-        probs = inference(dataset_1m, dataset_1d, prescriptor, device)
-        probs = torch.concat(probs, dim=1)
-        probs = probs.squeeze(dim=2)
+        probs = inference(dataset_1m, prescriptor, device)
+        # probs = torch.concat(probs, dim=1)
 
         train_metrics = fitness_fn(
             prescriptor=prescriptor,
@@ -695,8 +708,8 @@ def generation_valid(data_1m, dataset_1m, dataset_1d, prescriptor, evolution,
                 )
                 
                 valid_metrics = torch.from_numpy(valid_metrics[:elite_size])
-                valid_index = np.where((train_metrics[:elite_size][:, 6] > 3.0) & 
-                                       (train_metrics[:elite_size][:, 4] > 0.6))[0]
+                valid_index = np.where((train_metrics[:elite_size][:, 4] > 3.0) & 
+                                       (train_metrics[:elite_size][:, 3] < 60))[0]
                 valid_metrics = valid_metrics[valid_index]
                 
                 if best_profit is None:
@@ -738,14 +751,13 @@ def generation_valid(data_1m, dataset_1m, dataset_1d, prescriptor, evolution,
         del probs
     return best_chromosomes, best_profit
 
-def generation_test(data_1m, dataset_1m, dataset_1d, prescriptor, skip_data_cnt,
+def generation_test(data_1m, dataset_1m, prescriptor, skip_data_cnt,
                      start_data_cnt, end_data_cnt, chromosomes_size,
                      window_size, profit_init, 
                      entry_index_list=None, entry_pos_list=None, device='cuda:0'):
     
-    probs = inference(dataset_1m, dataset_1d, prescriptor, device)
-    probs = torch.concat(probs, dim=1)
-    probs = probs.squeeze(dim=2)
+    probs = inference(dataset_1m, prescriptor, device)
+    # probs = torch.concat(probs, dim=1)
     
     profit = fitness_fn(
         prescriptor=prescriptor,

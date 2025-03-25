@@ -40,25 +40,14 @@ class UniformCrossover(BaseCrossover):
         self.num_parents = num_parents
         self.prob_thd = torch.cumsum(torch.tensor([1. / num_parents] * num_parents), dim=0).flip(dims=[0])
     
-    # def __call__(self, parents: List[torch.Tensor]) -> torch.Tensor:
-    #     # 같은 확률로 각 parents의 개별 element를 선택함
-    #     offspring = parents[0].clone()  # deepcopy equivalent in PyTorch
-    #     prob_arr = torch.rand_like(offspring)
-        
-    #     for i in range(1, self.num_parents):
-    #         threshold = self.prob_thd[i]
-    #         offspring = torch.where(prob_arr <= threshold, parents[i], offspring)
-        
-    #     return offspring
-
-    def __call__(self, parents: torch.Tensor) -> torch.Tensor:
+    def __call__(self, parents: List[torch.Tensor]) -> torch.Tensor:
         # 같은 확률로 각 parents의 개별 element를 선택함
-        offspring = parents[:, 0].clone()  # deepcopy equivalent in PyTorch
+        offspring = parents.clone()  # deepcopy equivalent in PyTorch
         prob_arr = torch.rand_like(offspring)
         
         for i in range(1, self.num_parents):
             threshold = self.prob_thd[i]
-            offspring = torch.where(prob_arr <= threshold, parents[:, i], offspring)
+            offspring = torch.where(prob_arr <= threshold, parents[i], offspring)
         
         return offspring
     

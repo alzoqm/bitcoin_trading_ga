@@ -106,8 +106,8 @@ def BB_MACD_fitness_fn(data, window_size=240, short_window_size=20, long_window_
         curr_close = x['Close']
         upper = x[f'Upper_BB_{window_size}']
         lower = x[f'Lower_BB_{window_size}']
-        short_ma = x[f'EMA_{short_window_size}']
-        long_ma = x[f'EMA_{long_window_size}']
+        short_ma = x[f'SMA_{short_window_size}']
+        long_ma = x[f'SMA_{long_window_size}']
 
         # MACD 우선순위로 진입 포지션 결정
         entry_pos = macd_str.entry_on_crossover(short_ma, long_ma)
@@ -132,6 +132,40 @@ def BB_MACD_fitness_fn(data, window_size=240, short_window_size=20, long_window_
                 patience = 0
             before_pos = entry_pos
             index_list.append(index)
+        patience_list.append(patience)
+
+    return entry_pos_list, patience_list, index_list
+
+def simple_fitness_fn(data, window_size=240, short_window_size=20, long_window_size=60):
+    entry_pos_list = []
+    patience_list = []
+    index_list = []
+    patience = 0
+    before_pos = 'hold'
+    counter = 0  # 반복 횟수를 센다.
+
+    for index, x in tqdm(data.iterrows(), total=len(data)):
+        counter += 1
+
+        # 10번째마다 매수 포인트 생성, 나머지는 'hold'
+        if counter % 20 == 0:
+            entry_pos = 'long'
+        else:
+            entry_pos = 'hold'
+        entry_pos_list.append(entry_pos)
+
+        # 연속 'long' 상태의 경우 patience 증가, 새 매수 신호가 아니면 0으로 초기화
+        if entry_pos == 'long':
+            if before_pos == 'long':
+                patience += 1
+            else:
+                patience = 0
+            before_pos = entry_pos
+            index_list.append(index)
+        else:
+            # 'hold'인 경우, 특별한 처리 없이 그대로 둔다.
+            pass
+
         patience_list.append(patience)
 
     return entry_pos_list, patience_list, index_list
@@ -185,10 +219,10 @@ def BB_MACD_EMA_RSI_fitness_fn(data, window_size=240, short_window_size=20, long
         curr_close = x['Close']
         upper = x[f'Upper_BB_{window_size}']
         lower = x[f'Lower_BB_{window_size}']
-        short_ma = x[f'EMA_{short_window_size}']
-        long_ma = x[f'EMA_{long_window_size}']
+        short_ma = x[f'SMA_{short_window_size}']
+        long_ma = x[f'SMA_{long_window_size}']
         # EMA 추가 보조지표 (예: EMA_50)
-        ema_val = x[f'EMA_{ema_window}']
+        ema_val = x[f'SMA_{ema_window}']
         # RSI 값 (컬럼명이 'RSI'라고 가정)
         rsi_val = x[f'RSI_{short_window_size}']
 
@@ -198,8 +232,8 @@ def BB_MACD_EMA_RSI_fitness_fn(data, window_size=240, short_window_size=20, long
         if entry_pos == 'hold':
             entry_pos = bb_str.entry_on_return(curr_open, curr_close, upper, lower)
         # 3. BB 신호가 'hold'이면 EMA 전략 적용
-        if entry_pos == 'hold':
-            entry_pos = ema_str.entry_on_cross(curr_close, ema_val)
+        # if entry_pos == 'hold':
+        #     entry_pos = ema_str.entry_on_cross(curr_close, ema_val)
         # 4. EMA 신호가 'hold'이면 RSI 전략 적용
         if entry_pos == 'hold':
             entry_pos = rsi_str.entry_on_cross(rsi_val)
@@ -209,7 +243,7 @@ def BB_MACD_EMA_RSI_fitness_fn(data, window_size=240, short_window_size=20, long
         # 각 전략의 상태 업데이트 (다음 시점 비교를 위해)
         bb_str.check_bound(curr_open, curr_close, upper, lower)
         macd_str.check_macd(short_ma, long_ma)
-        ema_str.check_price(curr_close, ema_val)
+        # ema_str.check_price(curr_close, ema_val)
         rsi_str.check_rsi(rsi_val)
 
         # 진입 포지션이 바뀌거나 동일한 포지션 지속 시 patience 업데이트
