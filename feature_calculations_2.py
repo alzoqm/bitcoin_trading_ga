@@ -2,9 +2,10 @@
 
 import numpy as np
 import pandas as pd
-import numba
-
 from numba import njit
+
+def log_transform(data):
+    return np.sign(data) * np.log1p(np.abs(data))
 
 def resample_data(data, timeframe):
     temp_data = data.copy()
@@ -37,12 +38,12 @@ def calculate_MA_data(data, window, mode='MA', extra_str=None):
         col_name = format_col_name(f'SMA_{window}', extra_str)
         relative_col_name = format_col_name(f'SMA_{window}_rel', extra_str)
         data[col_name] = data['Close'].rolling(window=window).mean()
-        data[relative_col_name] = (data['Close'] - data[col_name]) / data['Close'] * 100
+        data[relative_col_name] = log_transform((data['Close'] - data[col_name]) / data['Close'] * 100)
     elif mode == 'EMA':  # Exponential Moving Average
         col_name = format_col_name(f'EMA_{window}', extra_str)
         relative_col_name = format_col_name(f'EMA_{window}_rel', extra_str)
         data[col_name] = data['Close'].ewm(span=window, adjust=False).mean()
-        data[relative_col_name] = (data['Close'] - data[col_name]) / data['Close'] * 100
+        data[relative_col_name] = log_transform((data['Close'] - data[col_name]) / data['Close'] * 100)
     elif mode == 'WMA':  # Weighted Moving Average
         col_name = format_col_name(f'WMA_{window}', extra_str)
         relative_col_name = format_col_name(f'WMA_{window}_rel', extra_str)
@@ -50,7 +51,7 @@ def calculate_MA_data(data, window, mode='MA', extra_str=None):
         data[col_name] = data['Close'].rolling(window=window).apply(
             lambda x: np.dot(x, weights) / sum(weights), raw=True
         )
-        data[relative_col_name] = (data['Close'] - data[col_name]) / data['Close'] * 100
+        data[relative_col_name] = log_transform((data['Close'] - data[col_name]) / data['Close'] * 100)
     else:
         raise ValueError(f"Mode {mode} not recognized. Available modes: 'MA', 'EMA', 'WMA'")
     new_cols.append(col_name)
@@ -73,8 +74,8 @@ def calculate_ema_bollinger_bands(df, window=20, num_std=2, extra_str=None):
     
     df[upper_col] = ma + (std * num_std)
     df[lower_col] = ma - (std * num_std)
-    df[upper_col_rel] = (df[upper_col] - df['Close']) / df['Close'] * 100
-    df[lower_col_rel] = (df['Close'] - df[lower_col]) / df['Close'] * 100
+    df[upper_col_rel] = log_transform((df[upper_col] - df['Close']) / df['Close'] * 100)
+    df[lower_col_rel] = log_transform((df['Close'] - df[lower_col]) / df['Close'] * 100)
     
     new_cols.extend([upper_col, lower_col])
     relative_new_cols.extend([upper_col_rel, lower_col_rel])
@@ -89,7 +90,7 @@ def calculate_rsi(df, window=14, extra_str=None):
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
     rsi_col = format_col_name(f'RSI_{window}', extra_str)
-    df[rsi_col] = rsi - 50
+    df[rsi_col] = (rsi - 50) / 25
     new_cols.append(rsi_col)
     return df, new_cols
 
@@ -104,8 +105,8 @@ def calculate_macd(df, short_window=12, long_window=26, signal_window=9, extra_s
     macd_data = short_ema - long_ema
     df[macd_col] = macd_data
     df[signal_col] = df[macd_col].ewm(span=signal_window, adjust=False).mean()
-    df[macd_col] = df[macd_col] / df['Close'] * 100
-    df[signal_col] = df[signal_col] / df['Close'] * 100
+    df[macd_col] = log_transform(df[macd_col] / df['Close'] * 100)
+    df[signal_col] = log_transform(df[signal_col] / df['Close'] * 100)
     
     new_cols.extend([macd_col, signal_col])
     
@@ -118,7 +119,7 @@ def calculate_stochastic_oscillator(df, k_window=14, d_window=3, extra_str=None)
     k_col = format_col_name(f'%K_{k_window}', extra_str)
     d_col = format_col_name(f'%D_{d_window}', extra_str)
     
-    df[k_col] = 100 * ((df['Close'] - low_min) / (high_max - low_min)) - 50
+    df[k_col] = (100 * ((df['Close'] - low_min) / (high_max - low_min)) - 50) / 25
     df[d_col] = df[k_col].rolling(window=d_window).mean()
     
     new_cols.extend([k_col, d_col])
@@ -145,7 +146,7 @@ def calculate_adx(df, window=14, extra_str=None):
     adx = dx.rolling(window=window).mean()
     
     adx_col = format_col_name(f'ADX_{window}', extra_str)
-    df[adx_col] = adx
+    df[adx_col] = log_transform(adx) - 2.276703340200053
     new_cols.append(adx_col)
     
     return df, new_cols
@@ -200,7 +201,7 @@ def calculate_williams_r(df, window=14, extra_str=None):
     williams_r = (high_max - df['Close']) / (high_max - low_min) * 100
     
     wr_col = format_col_name(f'Williams_%R_{window}', extra_str)
-    df[wr_col] = williams_r - 50
+    df[wr_col] =(williams_r - 50) / 25
     new_cols.append(wr_col)
     
     return df, new_cols
@@ -297,7 +298,8 @@ def calculate_support_resistance_numba(df, window=14, extra_str=None):
     df[resistance_col] = resistance
     df[relpos_col] = relpos
     
-    return df, [support_col, resistance_col, relpos_col]
+    return df, [relpos_col]
+
 
 
 
@@ -384,5 +386,3 @@ def cyclic_encode_fn(df, timestamp_col='Open time', cycle='minute_of_day'):
     
     return df, new_columns
 
-def log_transform(data):
-    return np.sign(data) * np.log1p(np.abs(data))
