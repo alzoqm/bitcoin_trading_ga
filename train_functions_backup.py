@@ -1,5 +1,4 @@
 import os
-
 import torch
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
@@ -21,63 +20,46 @@ from scipy.stats import skew, kurtosis
 # 전역적으로 기울기 계산 비활성화
 torch.set_grad_enabled(False)
 
-# def activation_fn(x: torch.Tensor, alpha=30):
-#     # return (x / (alpha + abs(x)) + 1) / 2
-#     return torch.sigmoid(x)
-
-# Example activation function (identity for simplicity in this test).
+# 예시 activation 함수 (identity)
 def activation_fn(x):
     return x
 
 def calculate_performance_metrics(returns_list, minimum_date=40):
     """
-    Calculate performance metrics for each chromosome based on their returns.
-
-    Args:
-        returns_list (np.ndarray): An array of shape (chromosomes_size, time_steps) containing the returns.
-        minimum_date (int): Minimum number of non-zero returns required to calculate metrics.
-
-    Returns:
-        np.ndarray: An array containing performance metrics for each chromosome.
+    원래 누적된 returns_list를 바탕으로 성과 지표(metrics)를 계산하는 함수.
+    (참고용으로 남겨두었으며, 본 예제에서는 사용하지 않습니다.)
     """
     chromosomes_size = returns_list.shape[0]
 
-    # Initialize arrays to store performance metrics
     mean_returns = np.full(chromosomes_size, -1e9)
     sharpe_ratios = np.full(chromosomes_size, -1e9)
     sortino_ratios = np.full(chromosomes_size, -1e9)
     profit_factors = np.full(chromosomes_size, -1e9)
     win_rates = np.full(chromosomes_size, -1e9)
     max_drawdowns = np.full(chromosomes_size, 1e9)
-    cumulative_returns = np.full(chromosomes_size, -1e9)  # Initialize Cumulative Returns
+    cumulative_returns = np.full(chromosomes_size, -1e9)  # 누적 수익률
 
-    risk_free_rate = 0.0  # Adjust as needed
+    risk_free_rate = 0.0  # 조정 가능
 
-    # Compute the number of non-zero returns for each chromosome
     num_non_zero = np.count_nonzero(returns_list != 0, axis=1)
     valid_chromosomes = num_non_zero > minimum_date
 
     if sum(valid_chromosomes) != 0:
-        # Replace zeros with NaN for non-zero returns calculations
         non_zero_returns_list = np.where(returns_list != 0, returns_list, np.nan)
 
-        # Compute mean returns and standard deviations
         mean_returns[valid_chromosomes] = np.nanmean(non_zero_returns_list[valid_chromosomes], axis=1)
         std_returns_i = np.nanstd(non_zero_returns_list[valid_chromosomes], axis=1) + 1e-9
 
-        # Sharpe Ratios
         valid_std = (std_returns_i != 0) & (~np.isnan(std_returns_i))
         sharpe_ratios_subset = (mean_returns[valid_chromosomes] - risk_free_rate) / std_returns_i
         sharpe_ratios[valid_chromosomes] = np.where(valid_std, sharpe_ratios_subset, -1e9)
         sharpe_ratios = np.where(np.isnan(sharpe_ratios), -1e9, sharpe_ratios)
 
-        # Max Drawdown
         cumulative_returns_raw = np.cumsum(returns_list, axis=1)
         running_max = np.maximum.accumulate(cumulative_returns_raw, axis=1)
         drawdowns = running_max - cumulative_returns_raw
         max_drawdowns[valid_chromosomes] = np.nanmax(drawdowns[valid_chromosomes], axis=1)
 
-        # Sortino Ratios
         negative_returns = np.where(non_zero_returns_list < 0, non_zero_returns_list, np.nan)
         downside_std = np.nanstd(negative_returns[valid_chromosomes], axis=1) + 1e-9
         valid_downside_std = (downside_std != 0) & (~np.isnan(downside_std))
@@ -85,7 +67,6 @@ def calculate_performance_metrics(returns_list, minimum_date=40):
         sortino_ratios[valid_chromosomes] = np.where(valid_downside_std, sortino_ratios_subset, -1e9)
         sortino_ratios = np.where(np.isnan(sortino_ratios), -1e9, sortino_ratios)
 
-        # Profit Factor
         total_profit = np.nansum(np.where(non_zero_returns_list > 0, non_zero_returns_list, 0), axis=1)
         total_loss = -np.nansum(np.where(non_zero_returns_list < 0, non_zero_returns_list, 0), axis=1)
         valid_total_loss = (total_loss != 0) & (~np.isnan(total_loss))
@@ -93,7 +74,6 @@ def calculate_performance_metrics(returns_list, minimum_date=40):
         profit_factors[valid_chromosomes & valid_total_loss] = total_profit[valid_chromosomes & valid_total_loss] / (total_loss[valid_chromosomes & valid_total_loss] + 1e-9)
         profit_factors = np.where(np.isnan(profit_factors), -1e9, profit_factors)
 
-        # Win Rate
         num_wins = np.nansum(np.where(non_zero_returns_list > 0, 1, 0), axis=1)
         num_trades = num_non_zero
         valid_num_trades = (num_trades != 0) & (~np.isnan(num_trades))
@@ -101,7 +81,6 @@ def calculate_performance_metrics(returns_list, minimum_date=40):
         win_rates[valid_chromosomes & valid_num_trades] = num_wins[valid_chromosomes & valid_num_trades] / num_trades[valid_chromosomes & valid_num_trades]
         win_rates = np.where(np.isnan(win_rates), -1e9, win_rates)
 
-        # Calculate Cumulative Returns
         initial_value = 1.0
         for idx in np.where(valid_chromosomes)[0]:
             clean_returns = returns_list[idx][returns_list[idx] != 0]
@@ -110,17 +89,6 @@ def calculate_performance_metrics(returns_list, minimum_date=40):
                 current_value += current_value * (ret / 100.0)
             cumulative_returns[idx] = current_value
 
-    # high_drawdown_indices = max_drawdowns >= 60
-    # penalty = max_drawdowns[high_drawdown_indices] - 60
-    # mean_returns[high_drawdown_indices] -= penalty
-    # sharpe_ratios[high_drawdown_indices] -= penalty
-    # sortino_ratios[high_drawdown_indices] -= penalty
-    # profit_factors[high_drawdown_indices] -= penalty
-    # win_rates[high_drawdown_indices] -= penalty
-    # max_drawdowns[high_drawdown_indices] += penalty
-    # cumulative_returns[high_drawdown_indices] -= penalty
-
-    # Expand dimensions and concatenate
     metrics = np.concatenate([
         np.expand_dims(mean_returns, axis=1),
         np.expand_dims(sharpe_ratios, axis=1),
@@ -128,10 +96,8 @@ def calculate_performance_metrics(returns_list, minimum_date=40):
         np.expand_dims(profit_factors, axis=1),
         np.expand_dims(win_rates, axis=1),
         np.expand_dims(max_drawdowns, axis=1),
-        np.expand_dims(cumulative_returns, axis=1)  # Add Cumulative Returns
+        np.expand_dims(cumulative_returns, axis=1)
     ], axis=1)
-
-    # print(metrics[np.where(high_drawdown_indices)[0]])
     
     return metrics
 
@@ -158,20 +124,16 @@ def inference(scaled_tensor, scaled_tensor_1d, model, device='cuda:0'):
     return logits
 
 def loss_cut_fn(pos_list, price_list, leverage_ratio, enter_ratio, profit, curr_low, curr_high, additional_count, alpha=1., cut_percent=80.):
-
-    # Positions: 'short' -> 1, 'long' -> 2, 'hold' -> 0
+    # 포지션: short -> 1, long -> 2, hold -> 0
     short_index = torch.where(pos_list == 1)[0]
     long_index = torch.where(pos_list == 2)[0]
 
-    # Calculate profit or loss
     short_profit = -((curr_high - price_list[short_index]) / price_list[short_index] * 100.) * leverage_ratio[short_index]
     long_profit = ((curr_low - price_list[long_index]) / price_list[long_index] * 100.) * leverage_ratio[long_index]
     
-    # Determine positions to cut
     short_cut_index = torch.where(short_profit <= -cut_percent)[0]
     long_cut_index = torch.where(long_profit <= -cut_percent)[0]
 
-    # Update state for short positions to be cut
     short_index = short_index[short_cut_index]
     profit[short_index] = profit[short_index] - (enter_ratio[short_index] * cut_percent * alpha) - 0.1 * leverage_ratio[short_index] * enter_ratio[short_index]
     pos_list[short_index] = 0
@@ -180,7 +142,6 @@ def loss_cut_fn(pos_list, price_list, leverage_ratio, enter_ratio, profit, curr_
     enter_ratio[short_index] = -1.
     additional_count[short_index] = 0
 
-    # Update state for long positions to be cut
     long_index = long_index[long_cut_index]
     profit[long_index] = profit[long_index] - (enter_ratio[long_index] * cut_percent * alpha) - 0.1 * leverage_ratio[long_index] * enter_ratio[long_index]
     pos_list[long_index] = 0
@@ -191,57 +152,35 @@ def loss_cut_fn(pos_list, price_list, leverage_ratio, enter_ratio, profit, curr_
 
     return pos_list, price_list, leverage_ratio, enter_ratio, additional_count, profit
 
-
-
 def calculate_action(
     prob,                # shape: (N, 5)
-    pos_list,            # current positions (0=hold, 1=short, 2=long)
+    pos_list,            # 현재 포지션 (0=hold, 1=short, 2=long)
     price_list,
     leverage_ratio,
     enter_ratio,
     profit,
     curr_close,
     additional_count,
-    limit=2,             # maximum number of "add" actions allowed
+    limit=2,             # 최대 추가진입 횟수
     cut_value=1.0,
     min_enter_ratio=0.05
 ):
-    """
-    prob: (N, 5) 텐서
-      - prob[:, :3] => (hold, short, long)에 대한 확률 분포
-      - prob[:, 3]  => 진입 비중(enter_ratio)을 위한 연속값
-      - prob[:, 4]  => 레버리지(1~125 사이)를 위한 연속값
-    
-    pos_list: 현재 보유 포지션 (0=hold, 1=short, 2=long)
-    price_list: 각 포지션의 평균 진입가격
-    leverage_ratio: 각 포지션의 레버리지
-    enter_ratio: 각 포지션의 진입 비중
-    profit: 누적 손익
-    curr_close: 현재 가격(배치 단위로 동일 가정)
-    additional_count: 동일 방향 'add'를 몇 번 했는지 기록
-    limit: 'add' 횟수 제한
-    cut_value: 최대 진입 비중
-    min_enter_ratio: 최소 진입 비중
-    """
-
     # ------------------------------------------------
-    # 1) Parse discrete (action) and continuous (enter_ratio, leverage) from prob
+    # 1) 이산(action) 및 연속(enter_ratio, leverage) 값 분리
     # ------------------------------------------------
-    action = torch.argmax(prob[:, :3], dim=1)  # discrete action
+    action = torch.argmax(prob[:, :3], dim=1)
     raw_enter_ratio = prob[:, 3]
     raw_leverage = prob[:, 4]
     
-    # Activation & clamp
     enter_enter_ratio = activation_fn(raw_enter_ratio)
     enter_enter_ratio = torch.clamp(enter_enter_ratio, min=min_enter_ratio, max=cut_value)
     
-    # 레버리지 범위 [1, 125]
-    enter_leverage = activation_fn(raw_leverage) * 124.0   # [0, 124]
-    enter_leverage_int = enter_leverage.int() + 1          # [1, 125]
-    enter_leverage_int = torch.clamp(enter_leverage_int, 20, 125)
+    enter_leverage = activation_fn(raw_leverage) * 124.0
+    enter_leverage_int = enter_leverage.int() + 1
+    enter_leverage_int = torch.clamp(enter_leverage_int, 5, 125)
 
     # ------------------------------------------------
-    # 2) Indices for each action
+    # 2) 각 action에 대한 인덱스 구분
     # ------------------------------------------------
     hold_index  = (action == 0)
     short_index = (action == 1)
@@ -252,9 +191,8 @@ def calculate_action(
     currently_long  = (pos_list == 2)
 
     # ------------------------------------------------
-    # 3) Close positions if action=hold
+    # 3) action=hold 시 포지션 청산
     # ------------------------------------------------
-    # 3-A) Close shorts -> move to hold
     close_short_idx = torch.where(currently_short & hold_index)[0]
     if len(close_short_idx) > 0:
         realized_pnl = (price_list[close_short_idx] - curr_close) / price_list[close_short_idx] * 100.0
@@ -268,7 +206,6 @@ def calculate_action(
         enter_ratio[close_short_idx] = -1.0
         additional_count[close_short_idx] = 0
 
-    # 3-B) Close longs -> move to hold
     close_long_idx = torch.where(currently_long & hold_index)[0]
     if len(close_long_idx) > 0:
         realized_pnl = (curr_close - price_list[close_long_idx]) / price_list[close_long_idx] * 100.0
@@ -283,21 +220,17 @@ def calculate_action(
         additional_count[close_long_idx] = 0
 
     # ------------------------------------------------
-    # 3-1) Flip short->long (반대 포지션 전환: short -> long)
-    #     조건: currently_short 상태이고 action이 long이면서, prob[:,2] >= 0.7
+    # 3-1) 반대 포지션 전환: short -> long
     # ------------------------------------------------
     flip_short_to_long_idx = torch.where(currently_short & long_index)[0]
-    # 해당 인덱스 중, "long 확률이 0.7 이상"인 케이스만 필터
     flip_short_to_long_idx = flip_short_to_long_idx[prob[flip_short_to_long_idx, 2] >= 0.7]
 
     if len(flip_short_to_long_idx) > 0:
-        # 먼저 short 포지션 청산
         realized_pnl = (price_list[flip_short_to_long_idx] - curr_close) / price_list[flip_short_to_long_idx] * 100.0
         realized_pnl = realized_pnl * leverage_ratio[flip_short_to_long_idx] * enter_ratio[flip_short_to_long_idx]
         fee = 0.1 * leverage_ratio[flip_short_to_long_idx] * enter_ratio[flip_short_to_long_idx]
         profit[flip_short_to_long_idx] += (realized_pnl - fee)
 
-        # 바로 long 포지션 진입
         pos_list[flip_short_to_long_idx] = 2
         price_list[flip_short_to_long_idx] = curr_close
         leverage_ratio[flip_short_to_long_idx] = enter_leverage_int[flip_short_to_long_idx]
@@ -306,21 +239,17 @@ def calculate_action(
         additional_count[flip_short_to_long_idx] = 0
 
     # ------------------------------------------------
-    # 3-2) Flip long->short (반대 포지션 전환: long -> short)
-    #     조건: currently_long 상태이고 action이 short이면서, prob[:,1] >= 0.7
+    # 3-2) 반대 포지션 전환: long -> short
     # ------------------------------------------------
     flip_long_to_short_idx = torch.where(currently_long & short_index)[0]
-    # 해당 인덱스 중, "short 확률이 0.7 이상"인 케이스만 필터
     flip_long_to_short_idx = flip_long_to_short_idx[prob[flip_long_to_short_idx, 1] >= 0.7]
 
     if len(flip_long_to_short_idx) > 0:
-        # 먼저 long 포지션 청산
         realized_pnl = (curr_close - price_list[flip_long_to_short_idx]) / price_list[flip_long_to_short_idx] * 100.0
         realized_pnl = realized_pnl * leverage_ratio[flip_long_to_short_idx] * enter_ratio[flip_long_to_short_idx]
         fee = 0.1 * leverage_ratio[flip_long_to_short_idx] * enter_ratio[flip_long_to_short_idx]
         profit[flip_long_to_short_idx] += (realized_pnl - fee)
 
-        # 바로 short 포지션 진입
         pos_list[flip_long_to_short_idx] = 1
         price_list[flip_long_to_short_idx] = curr_close
         leverage_ratio[flip_long_to_short_idx] = enter_leverage_int[flip_long_to_short_idx]
@@ -329,9 +258,8 @@ def calculate_action(
         additional_count[flip_long_to_short_idx] = 0
 
     # ------------------------------------------------
-    # 4) Open/Add short
+    # 4) 포지션 열기/추가: short
     # ------------------------------------------------
-    # 4-A) 현재 포지션이 hold이고, action=short 일 때 open
     open_short_idx = torch.where(currently_hold & short_index)[0]
     if len(open_short_idx) > 0:
         pos_list[open_short_idx] = 1
@@ -341,7 +269,6 @@ def calculate_action(
         enter_ratio[open_short_idx] = enter_enter_ratio[open_short_idx]
         additional_count[open_short_idx] = 0
 
-    # 4-B) 현재 포지션이 short이고, action=short 일 때 add (추가 진입)
     add_short_idx = torch.where(currently_short & short_index)[0]
     if len(add_short_idx) > 0:
         can_add_idx = add_short_idx[additional_count[add_short_idx] < limit]
@@ -350,7 +277,6 @@ def calculate_action(
             before_ratio = enter_ratio[can_add_idx]
             add_ratio = enter_enter_ratio[can_add_idx]
             add_ratio = torch.minimum((cut_value - before_ratio), add_ratio)
-            # add_ratio가 음수가 되지 않도록 clamp
             add_ratio = torch.clamp(add_ratio, min=0.0)
 
             after_price = (
@@ -362,16 +288,11 @@ def calculate_action(
 
             price_list[can_add_idx] = after_price
             enter_ratio[can_add_idx] = after_ratio
-            # (주의) 레버리지 합산 로직이 필요하다면 아래를 사용
-            # new_lev = leverage_ratio[can_add_idx] + enter_leverage_int[can_add_idx]
-            # leverage_ratio[can_add_idx] = torch.clamp(new_lev, 1, 125)
-
             additional_count[can_add_idx] += 1
 
     # ------------------------------------------------
-    # 5) Open/Add long
+    # 5) 포지션 열기/추가: long
     # ------------------------------------------------
-    # 5-A) 현재 포지션이 hold이고, action=long 일 때 open
     open_long_idx = torch.where(currently_hold & long_index)[0]
     if len(open_long_idx) > 0:
         pos_list[open_long_idx] = 2
@@ -381,7 +302,6 @@ def calculate_action(
         enter_ratio[open_long_idx] = enter_enter_ratio[open_long_idx]
         additional_count[open_long_idx] = 0
 
-    # 5-B) 현재 포지션이 long이고, action=long 일 때 add (추가 진입)
     add_long_idx = torch.where(currently_long & long_index)[0]
     if len(add_long_idx) > 0:
         can_add_idx = add_long_idx[additional_count[add_long_idx] < limit]
@@ -401,10 +321,6 @@ def calculate_action(
 
             price_list[can_add_idx] = after_price
             enter_ratio[can_add_idx] = after_ratio
-            # (주의) 레버리지 합산 로직이 필요하다면 아래를 사용
-            # new_lev = leverage_ratio[can_add_idx] + enter_leverage_int[can_add_idx]
-            # leverage_ratio[can_add_idx] = torch.clamp(new_lev, 1, 125)
-
             additional_count[can_add_idx] += 1
 
     return pos_list, price_list, leverage_ratio, enter_ratio, additional_count, profit
@@ -422,22 +338,16 @@ def time_based_exit_fn(
     device='cpu'
 ):
     """
-    일정 기간(여기서는 max_holding_bars) 이상 보유한 포지션을 강제로 청산한다.
+    일정 기간 이상 보유한 포지션을 강제 청산하는 함수
     """
-    # 청산 대상 인덱스: 현재 보유 기간이 max_holding_bars를 초과하고, 포지션이 열려 있는 경우
     close_indices = torch.where((holding_period > max_holding_bars) & (pos_list != 0))[0]
     if len(close_indices) > 0:
-        # ---------------------------
-        # short 포지션 강제청산
-        # ---------------------------
         short_idx = close_indices[pos_list[close_indices] == 1]
         if len(short_idx) > 0:
-            # 청산 손익 계산
             realized_pnl = (price_list[short_idx] - curr_price) / price_list[short_idx] * 100.0
             realized_pnl = realized_pnl * leverage_ratio[short_idx] * enter_ratio[short_idx]
             fee = 0.1 * leverage_ratio[short_idx] * enter_ratio[short_idx]
             profit[short_idx] += (realized_pnl - fee)
-            # 포지션 종료 처리
             pos_list[short_idx] = 0
             price_list[short_idx] = -1.0
             leverage_ratio[short_idx] = -1
@@ -445,9 +355,6 @@ def time_based_exit_fn(
             additional_count[short_idx] = 0
             holding_period[short_idx] = 0
 
-        # ---------------------------
-        # long 포지션 강제청산
-        # ---------------------------
         long_idx = close_indices[pos_list[close_indices] == 2]
         if len(long_idx) > 0:
             realized_pnl = (curr_price - price_list[long_idx]) / price_list[long_idx] * 100.0
@@ -465,8 +372,8 @@ def time_based_exit_fn(
 
 def calculate_now_profit(pos_list, price_list, leverage_ratio, enter_ratio, curr_price):
     now_profit = torch.zeros_like(pos_list, dtype=torch.float32)
-    short_index = torch.where(pos_list == 1)[0]  # 'short' -> 1
-    long_index = torch.where(pos_list == 2)[0]  # 'long' -> 2
+    short_index = torch.where(pos_list == 1)[0]
+    long_index = torch.where(pos_list == 2)[0]
 
     short_profit = (-((curr_price - price_list[short_index]) / price_list[short_index] * 100.) * leverage_ratio[short_index]) - 0.1 * leverage_ratio[short_index] * enter_ratio[short_index]
     long_profit = (((curr_price - price_list[long_index]) / price_list[long_index] * 100.) * leverage_ratio[long_index]) - 0.1 * leverage_ratio[long_index] * enter_ratio[long_index]
@@ -477,14 +384,12 @@ def calculate_now_profit(pos_list, price_list, leverage_ratio, enter_ratio, curr
 
     return now_profit
 
-
-
 def after_forward(model, prob, now_profit, leverage_ratio, enter_ratio, pos_list, device):
     ch_size = len(now_profit)
     now_profit_tensor = now_profit.unsqueeze(dim=1)
     leverage_ratio_tensor = leverage_ratio.unsqueeze(dim=1).to(torch.float32)
     enter_ratio_tensor = enter_ratio.unsqueeze(dim=1)
-    mapping = {0: 0, 1: 1, 2: 2}  # Adjusted mapping
+    mapping = {0: 0, 1: 1, 2: 2}  # 필요에 따라 조정
     mapped_array = pos_list
     step = torch.arange(0, ch_size * 3, step=3, device=device)
 
@@ -497,12 +402,9 @@ def after_forward(model, prob, now_profit, leverage_ratio, enter_ratio, pos_list
     after_output = model.after_forward(x=x.squeeze(dim=0), x_cate=cate_x)
     return after_output.squeeze(dim=0)
 
-
-
 def calculate_fitness(metrics):
     chromosomes_size = len(metrics)
     
-    # Normalize metrics
     def normalize_metric(metric, higher_is_better=True):
         valid_indices = metric != -1e9
         valid_metric = metric[valid_indices]
@@ -517,79 +419,94 @@ def calculate_fitness(metrics):
                 normalized = (metric - min_val) / (max_val - min_val + 1e-8)
             else:
                 normalized = (max_val - metric) / (max_val - min_val + 1e-8)
-        normalized[~valid_indices] = 0.0  # Assign zero to invalid entries
+        normalized[~valid_indices] = 0.0
         return normalized
 
     higher_is_better_list = [
-        True,   # 'mean_returns'
-        True,   # 'sharpe_ratios'
-        True,   # 'sortino_ratios'
-        True,   # 'profit_factors'
-        True,   # 'win_rates'
-        False,  # 'max_drawdowns'
+        True,   # mean_returns
+        True,   # sharpe_ratios
+        True,   # sortino_ratios
+        True,   # profit_factors
+        True,   # win_rates
+        False,  # max_drawdowns
         True    # cumulative_returns
     ]
     for index in range(len(higher_is_better_list)):
         metrics[:, index] = normalize_metric(metrics[:, index], higher_is_better=higher_is_better_list[index])
 
-    # weights 배열을 metrics 순서에 맞춰서 재정렬
-    # # 수익 위주의 학습
-    # weights = [
-    #     0.2,  # mean_returns: 0
-    #     0.05,  # sharpe_ratios: 1
-    #     0.10,  # sortino_ratios: 2
-    #     0.10,  # profit_factors: 3
-    #     0.15,  # win_rates: 4
-    #     0.2,  # max_drawdowns: 5
-    #     0.2  # cumulative_returns
-    # ]
-    # 승률 위주의 학습
     weights = [
-        0.1,  # mean_returns: 0
-        0.05,  # sharpe_ratios: 1
-        0.05,  # sortino_ratios: 2
-        0.05,  # profit_factors: 3
-        0.15,  # win_rates: 4
-        0.1,  # max_drawdowns: 5
-        0.6  # cumulative_returns
+        0.1,   # mean_returns
+        0.05,  # sharpe_ratios
+        0.05,  # sortino_ratios
+        0.05,  # profit_factors
+        0.15,  # win_rates
+        0.1,   # max_drawdowns
+        0.6    # cumulative_returns
+        # 0.0,   # mean_returns
+        # 0.0,   # sharpe_ratios
+        # 0.0,   # sortino_ratios
+        # 0.0,   # profit_factors
+        # 0.0,   # win_rates
+        # 0.0,   # max_drawdowns
+        # 1.0    # cumulative_returns
     ]
-    # Calculate the final fitness values
     fitness_values = np.zeros(chromosomes_size)
     for index in range(len(weights)):
         fitness_values += weights[index] * metrics[:, index]
 
-    # Penalize chromosomes with invalid fitness
     fitness_values[metrics[:, 0] == -1e9] = -1e9
 
     return fitness_values
 
 def fitness_fn(prescriptor, data, probs, entry_index_list, entry_pos_list, skip_data_cnt, start_data_cnt, chromosomes_size, window_size,
                alpha=1., cut_percent=90., device='cpu', stop_cnt=1e9, profit_init=10, limit=4, minimum_date=40):
-    # Initialize variables
-    if stop_cnt != 1e9:
-        simulation_date = days_difference(data.iloc[entry_index_list[start_data_cnt]]['Open time'], data.iloc[entry_index_list[stop_cnt]]['Open time'])
-    else:
-        simulation_date = days_difference(data.iloc[entry_index_list[start_data_cnt]]['Open time'], data.iloc[-1]['Open time'])
-    ic(simulation_date)
-    pos_list = torch.zeros(chromosomes_size, dtype=torch.long, device=device)  # 0: 'hold'
+    """
+    수정된 fitness_fn 함수  
+    - 매 시점마다 profit 값을 즉시 누적 통계(aggregated statistics)에 업데이트하여 returns_list를 누적하지 않습니다.
+    - 최종적으로 각 chromosome별 성과 지표(metrics)를 계산하여 numpy array로 반환합니다.
+    """
+    pos_list = torch.zeros(chromosomes_size, dtype=torch.long, device=device)  # 0: hold
     price_list = torch.full((chromosomes_size,), -1.0, dtype=torch.float32, device=device)
     leverage_ratio = torch.full((chromosomes_size,), -1, dtype=torch.int, device=device)
     enter_ratio = torch.full((chromosomes_size,), -1.0, dtype=torch.float32, device=device)
     profit = torch.zeros((chromosomes_size,), dtype=torch.float32, device=device)
     additional_count = torch.zeros(chromosomes_size, dtype=torch.long, device=device)
     holding_period = torch.zeros(chromosomes_size, dtype=torch.long, device=device)
-    returns_list = []
-    before_index = 0
-
-    # Map entry positions
+    
+    # 누적 통계를 위한 변수들
+    sum_returns = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    count_returns = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
+    sum_sq_returns = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    
+    sum_neg = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    count_neg = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
+    sum_sq_neg = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    
+    total_profit_agg = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    total_loss_agg = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    
+    count_wins = torch.zeros(chromosomes_size, device=device, dtype=torch.int32)
+    
+    cum_sum = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    running_max = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    max_drawdown = torch.zeros(chromosomes_size, device=device, dtype=torch.float32)
+    
+    compound_value = torch.ones(chromosomes_size, device=device, dtype=torch.float32)
+    
+    risk_free_rate = 0.0
+    
     entry_pos_mapping = {'hold': 0, 'short': 1, 'long': 2}
     entry_pos_list_int = [entry_pos_mapping[ep] for ep in entry_pos_list]
+    
+    before_index = 0
 
-    for data_cnt, (entry_index, entry_pos) in tqdm(enumerate(zip(entry_index_list, entry_pos_list_int)), total=len(entry_pos_list_int)):
+    for data_cnt, (entry_index, entry_pos) in tqdm(enumerate(zip(entry_index_list, entry_pos_list_int)),
+                                                   total=len(entry_pos_list_int)):
         if data_cnt >= stop_cnt:
             break
         if data_cnt < start_data_cnt:
             continue
+
         entry_pos = torch.tensor(entry_pos).long()
         x = data.iloc[entry_index]
         curr_open = torch.tensor(x['Open'], dtype=torch.float32, device=device)
@@ -609,30 +526,19 @@ def fitness_fn(prescriptor, data, probs, entry_index_list, entry_pos_list, skip_
             additional_count, alpha, cut_percent
         )
         
-        # if data_cnt < start_data_cnt:
-        #     continue
-        prob = torch.tensor(probs[:, data_cnt-skip_data_cnt]).to(device)
-        
+        prob = torch.tensor(probs[:, data_cnt - skip_data_cnt]).float().to(device)
         now_profit = calculate_now_profit(pos_list, price_list, leverage_ratio, enter_ratio, curr_close)
         prob = after_forward(prescriptor, prob, now_profit, leverage_ratio, enter_ratio, pos_list, device=device)
         
-        # 3) Decide how to update positions based on the new unified function
         pos_list, price_list, leverage_ratio, enter_ratio, additional_count, profit = calculate_action(
             prob, pos_list, price_list, leverage_ratio, enter_ratio,
             profit, curr_close, additional_count,
             limit=limit, min_enter_ratio=0.05
         )
         
-        # -------------------------
-        # (1) 보유 기간 추적 로직
-        # -------------------------
-        # 포지션이 열려 있으면 +1, 포지션이 0이면 보유 기간 0으로 초기화
         holding_period[pos_list != 0] += 1
         holding_period[pos_list == 0] = 0
 
-        # # -------------------------
-        # # (2) 최대 보유 기간 초과 시 강제 청산
-        # -------------------------
         pos_list, price_list, leverage_ratio, enter_ratio, additional_count, profit, holding_period = time_based_exit_fn(
             pos_list,
             price_list,
@@ -642,27 +548,94 @@ def fitness_fn(prescriptor, data, probs, entry_index_list, entry_pos_list, skip_
             profit,
             curr_close,
             holding_period,
-            max_holding_bars=100,  # 인자로 전달
+            max_holding_bars=100,
             device=device
         )
-
-
+        
+        # profit 값(이번 시점의 각 chromosome의 손익)을 누적 통계에 업데이트
+        non_zero_mask = profit != 0
+        sum_returns[non_zero_mask] += profit[non_zero_mask]
+        count_returns[non_zero_mask] += 1
+        sum_sq_returns[non_zero_mask] += profit[non_zero_mask] ** 2
+        
+        neg_mask = profit < 0
+        sum_neg[neg_mask] += profit[neg_mask]
+        count_neg[neg_mask] += 1
+        sum_sq_neg[neg_mask] += profit[neg_mask] ** 2
+        
+        pos_mask = profit > 0
+        total_profit_agg[pos_mask] += profit[pos_mask]
+        total_loss_agg[neg_mask] += -profit[neg_mask]
+        
+        count_wins[pos_mask] += 1
+        
+        cum_sum = cum_sum + profit
+        running_max = torch.maximum(running_max, cum_sum)
+        current_drawdown = running_max - cum_sum
+        max_drawdown = torch.maximum(max_drawdown, current_drawdown)
+        
+        compound_value[non_zero_mask] = compound_value[non_zero_mask] * (1 + profit[non_zero_mask] / 100.0)
+        
         before_index = entry_index
-        returns_list.append(profit.clone().cpu().detach().numpy())
         profit = torch.zeros(chromosomes_size, dtype=torch.float32, device=device)
-
-    returns_list = np.array(returns_list).T  # Shape: (chromosomes_size, time_steps)
-
-    # Calculate performance metrics
-    metrics = calculate_performance_metrics(returns_list, minimum_date=3)
-    # metrics = calculate_performance_metrics(returns_list, minimum_date=3)
-
-    return metrics
+    
+    count_returns_f = count_returns.float()
+    mean_returns = torch.where(
+        count_returns_f > 0, 
+        sum_returns / count_returns_f, 
+        torch.full_like(sum_returns, -1e9)
+    )
+    variance_returns = torch.where(
+        count_returns_f > 0,
+        sum_sq_returns / count_returns_f - mean_returns ** 2,
+        torch.zeros_like(sum_returns)
+    )
+    std_returns = torch.sqrt(variance_returns + 1e-9)
+    sharpe_ratios = torch.where(
+        std_returns > 0, 
+        (mean_returns - risk_free_rate) / std_returns, 
+        torch.full_like(mean_returns, -1e9)
+    )
+    
+    count_neg_f = count_neg.float()
+    mean_neg = torch.where(count_neg_f > 0, sum_neg / count_neg_f, torch.zeros_like(sum_neg))
+    variance_neg = torch.where(count_neg_f > 0, sum_sq_neg / count_neg_f - mean_neg ** 2, torch.zeros_like(sum_neg))
+    std_neg = torch.sqrt(variance_neg + 1e-9)
+    sortino_ratios = torch.where(
+        std_neg > 0, 
+        (mean_returns - risk_free_rate) / std_neg, 
+        torch.full_like(mean_returns, -1e9)
+    )
+    
+    profit_factors = torch.where(
+        total_loss_agg > 0, 
+        total_profit_agg / (total_loss_agg + 1e-9), 
+        torch.full_like(total_profit_agg, -1e9)
+    )
+    
+    win_rates = torch.where(
+        count_returns_f > 0, 
+        count_wins.float() / count_returns_f, 
+        torch.full_like(count_returns_f, -1e9)
+    )
+    
+    invalid_mask = count_returns < minimum_date
+    mean_returns[invalid_mask] = -1e9
+    sharpe_ratios[invalid_mask] = -1e9
+    sortino_ratios[invalid_mask] = -1e9
+    profit_factors[invalid_mask] = -1e9
+    win_rates[invalid_mask] = -1e9
+    max_drawdown[invalid_mask] = 1e9
+    compound_value[invalid_mask] = -1e9
+    
+    metrics = torch.stack(
+        [mean_returns, sharpe_ratios, sortino_ratios, profit_factors, win_rates, max_drawdown, compound_value], 
+        dim=1
+    )
+    return metrics.cpu().numpy()
 
 def get_chromosome_key(chromosome):
-    # Quantize the chromosome values to 6 decimal places to handle floating-point precision
     quantized_chrom = np.round(chromosome.cpu().numpy(), decimals=6)
-    # Convert to tuple to make it hashable
     return tuple(quantized_chrom.flatten())
 
 def generation_valid(data_1m, dataset_1m, dataset_1d, prescriptor, evolution,
@@ -674,7 +647,6 @@ def generation_valid(data_1m, dataset_1m, dataset_1d, prescriptor, evolution,
     
     best_profit = best_profit
     best_chromosomes = best_chromosomes
-    # Create a temporary folder to save the generation data
     temp_dir = 'generation'
     os.makedirs(temp_dir, exist_ok=True)
     
@@ -702,7 +674,6 @@ def generation_valid(data_1m, dataset_1m, dataset_1d, prescriptor, evolution,
             profit_init=profit_init,
             limit=4
         )
-        # profit = np.concatenate([profit]).T
         if warming_step <= gen_idx:
             if gen_idx != 0:
                 valid_metrics = fitness_fn(
@@ -725,24 +696,19 @@ def generation_valid(data_1m, dataset_1m, dataset_1d, prescriptor, evolution,
                 
                 valid_metrics = torch.from_numpy(valid_metrics[:elite_size])
                 valid_index = np.where((train_metrics[:elite_size][:, 6] > 3.0) & 
-                                    #    (train_metrics[:elite_size][:, 5] < 60) & 
                                        (train_metrics[:elite_size][:, 4] > 0.6))[0]
                 valid_metrics = valid_metrics[valid_index]
                 
-                # Initialize best fitness and chromosomes if not already done
                 if best_profit is None:
                     best_profit = valid_metrics
                     best_chromosomes, _, _, _ = evolution.flatten_chromosomes()
                     best_chromosomes = torch.tensor(best_chromosomes[:elite_size])[valid_index].clone()
                 else:
-                    # Flatten current chromosomes
                     chromosomes, _, _, _ = evolution.flatten_chromosomes()
                     chromosomes = chromosomes[:elite_size][valid_index].clone()
                     
-                    # Find indices of new fitness values not in best fitness
                     new_indices = [index for index, t in enumerate(valid_metrics) if t not in best_profit]
                     
-                    # Update fitness and chromosomes with new values
                     new_fitness = deepcopy(valid_metrics[new_indices])
                     new_chromosomes = chromosomes[new_indices]
                     
@@ -752,27 +718,19 @@ def generation_valid(data_1m, dataset_1m, dataset_1d, prescriptor, evolution,
                 if len(best_chromosomes) > best_size:
                     print('check_discard')
                     valid_fitness = calculate_fitness(deepcopy(best_profit).numpy())
-                    # Select elite chromosomes based on best fitness
                     elite_idx, elite_chromosomes = evolution.select_elite(torch.from_numpy(valid_fitness), best_chromosomes, best_size)
 
-                    # Update best fitness and chromosomes with elite values
                     best_profit = best_profit[elite_idx]
                     best_chromosomes = elite_chromosomes
 
-            
-
-        # Save current generation values to a file
         gen_data = {
             "generation": gen_idx,
             "prescriptor_state_dict": prescriptor.state_dict(),
             "best_profit": best_profit,
             "best_chromosomes": best_chromosomes,
-
         }
         
-        
         train_fitness = calculate_fitness(train_metrics)
-        # torch.save(gen_data, os.path.join(temp_dir, f'generation_{gen_idx}.pt')) 
         torch.save(gen_data, os.path.join(temp_dir, f'generation_{gen_idx}.pt')) 
         evolution.evolve(torch.from_numpy(train_fitness))
         prescriptor = prescriptor.to(device)
@@ -807,5 +765,4 @@ def generation_test(data_1m, dataset_1m, dataset_1d, prescriptor, skip_data_cnt,
         limit=4
     )
         
-       
     return profit

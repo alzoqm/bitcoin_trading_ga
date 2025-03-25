@@ -382,7 +382,7 @@ def calculate_fitness_long_short(
     profit_factor = (profit_factors_long + profit_factors_short) / 2
     win_rate = (win_rates_long + win_rates_short) / 2
     max_drawdown = (max_dd_long + max_dd_short) / 2
-    compound = (compound_long * compound_short)
+    compound = (compound_long * compound_short) / 2
 
     # invalid인 경우 -1e9 대입
     mean_returns[invalid_both] = -1e9
@@ -454,60 +454,6 @@ def calculate_fitness(metrics):
     fitness_values[metrics[:, 0] == -1e9] = -1e9
 
     return fitness_values
-
-
-# ---------------------------------------------------
-# [시간 기반 청산 함수] -> 롱/숏 수익 분리
-# ---------------------------------------------------
-def time_based_exit_fn(pos_list,
-                       price_list,
-                       leverage_ratio,
-                       enter_ratio,
-                       additional_count,
-                       profit_long,
-                       profit_short,
-                       curr_price,
-                       holding_period,
-                       max_holding_bars=100,
-                       device='cpu'):
-    """
-    일정 기간 이상 보유한 포지션 강제 청산
-    """
-    close_indices = torch.where((holding_period > max_holding_bars) & (pos_list != 0))[0]
-    if len(close_indices) > 0:
-        # 숏 포지션 청산
-        short_idx = close_indices[pos_list[close_indices] == 1]
-        if len(short_idx) > 0:
-            realized_pnl = (price_list[short_idx] - curr_price) / price_list[short_idx] * 100.0
-            realized_pnl = realized_pnl * leverage_ratio[short_idx] * enter_ratio[short_idx]
-            fee = 0.1 * leverage_ratio[short_idx] * enter_ratio[short_idx]
-
-            profit_short[short_idx] += (realized_pnl - fee)
-
-            pos_list[short_idx] = 0
-            price_list[short_idx] = -1.0
-            leverage_ratio[short_idx] = -1
-            enter_ratio[short_idx] = -1.0
-            additional_count[short_idx] = 0
-            holding_period[short_idx] = 0
-
-        # 롱 포지션 청산
-        long_idx = close_indices[pos_list[close_indices] == 2]
-        if len(long_idx) > 0:
-            realized_pnl = (curr_price - price_list[long_idx]) / price_list[long_idx] * 100.0
-            realized_pnl = realized_pnl * leverage_ratio[long_idx] * enter_ratio[long_idx]
-            fee = 0.1 * leverage_ratio[long_idx] * enter_ratio[long_idx]
-
-            profit_long[long_idx] += (realized_pnl - fee)
-
-            pos_list[long_idx] = 0
-            price_list[long_idx] = -1.0
-            leverage_ratio[long_idx] = -1
-            enter_ratio[long_idx] = -1.0
-            additional_count[long_idx] = 0
-            holding_period[long_idx] = 0
-
-    return pos_list, price_list, leverage_ratio, enter_ratio, additional_count, profit_long, profit_short, holding_period
 
 # ---------------------------------------------------
 # [fitness_fn] - 롱/숏 분리 + 시뮬레이션
@@ -786,6 +732,60 @@ def fitness_fn(prescriptor,
 
 
 # ---------------------------------------------------
+# [시간 기반 청산 함수] -> 롱/숏 수익 분리
+# ---------------------------------------------------
+def time_based_exit_fn(pos_list,
+                       price_list,
+                       leverage_ratio,
+                       enter_ratio,
+                       additional_count,
+                       profit_long,
+                       profit_short,
+                       curr_price,
+                       holding_period,
+                       max_holding_bars=100,
+                       device='cpu'):
+    """
+    일정 기간 이상 보유한 포지션 강제 청산
+    """
+    close_indices = torch.where((holding_period > max_holding_bars) & (pos_list != 0))[0]
+    if len(close_indices) > 0:
+        # 숏 포지션 청산
+        short_idx = close_indices[pos_list[close_indices] == 1]
+        if len(short_idx) > 0:
+            realized_pnl = (price_list[short_idx] - curr_price) / price_list[short_idx] * 100.0
+            realized_pnl = realized_pnl * leverage_ratio[short_idx] * enter_ratio[short_idx]
+            fee = 0.1 * leverage_ratio[short_idx] * enter_ratio[short_idx]
+
+            profit_short[short_idx] += (realized_pnl - fee)
+
+            pos_list[short_idx] = 0
+            price_list[short_idx] = -1.0
+            leverage_ratio[short_idx] = -1
+            enter_ratio[short_idx] = -1.0
+            additional_count[short_idx] = 0
+            holding_period[short_idx] = 0
+
+        # 롱 포지션 청산
+        long_idx = close_indices[pos_list[close_indices] == 2]
+        if len(long_idx) > 0:
+            realized_pnl = (curr_price - price_list[long_idx]) / price_list[long_idx] * 100.0
+            realized_pnl = realized_pnl * leverage_ratio[long_idx] * enter_ratio[long_idx]
+            fee = 0.1 * leverage_ratio[long_idx] * enter_ratio[long_idx]
+
+            profit_long[long_idx] += (realized_pnl - fee)
+
+            pos_list[long_idx] = 0
+            price_list[long_idx] = -1.0
+            leverage_ratio[long_idx] = -1
+            enter_ratio[long_idx] = -1.0
+            additional_count[long_idx] = 0
+            holding_period[long_idx] = 0
+
+    return pos_list, price_list, leverage_ratio, enter_ratio, additional_count, profit_long, profit_short, holding_period
+
+
+# ---------------------------------------------------
 # [유전자 알고리즘 학습 루프(예시)] -> generation_valid
 # ---------------------------------------------------
 def generation_valid(data_1m,
@@ -814,6 +814,9 @@ def generation_valid(data_1m,
     """
     temp_dir = 'generation'
     os.makedirs(temp_dir, exist_ok=True)
+    
+    # ### MODIFIED: train profit을 저장할 변수 추가
+    best_train_profit = None
 
     for gen_idx in range(start_gen, gen_loop):
         print(f'[Generation {gen_idx}]')
@@ -866,8 +869,14 @@ def generation_valid(data_1m,
                                     (train_metrics[:elite_size][:, 4] > 0.6))[0]
             valid_metrics = valid_metrics[valid_index]
             
+            # ### MODIFIED: train profit도 같은 valid_index로 필터링하여 저장
+            train_metrics_tensor = torch.from_numpy(train_metrics[:elite_size])
+            train_metrics_filtered = train_metrics_tensor[valid_index]
+
             if best_profit is None:
                 best_profit = valid_metrics
+                # ### MODIFIED: best_train_profit 초기화
+                best_train_profit = train_metrics_filtered
                 best_chromosomes, _, _, _ = evolution.flatten_chromosomes()
                 best_chromosomes = torch.tensor(best_chromosomes[:elite_size])[valid_index].clone()
             else:
@@ -878,9 +887,12 @@ def generation_valid(data_1m,
                 
                 new_fitness = deepcopy(valid_metrics[new_indices])
                 new_chromosomes = chromosomes[new_indices]
+                # ### MODIFIED: 새로운 train profit도 함께 업데이트
+                new_train_profit = train_metrics_filtered[new_indices]
                 
                 best_profit = torch.concat([best_profit, new_fitness])
                 best_chromosomes = torch.concat([best_chromosomes, torch.tensor(new_chromosomes)])
+                best_train_profit = torch.concat([best_train_profit, new_train_profit])
 
             if len(best_chromosomes) > best_size:
                 print('check_discard')
@@ -889,12 +901,16 @@ def generation_valid(data_1m,
 
                 best_profit = best_profit[elite_idx]
                 best_chromosomes = elite_chromosomes
+                # ### MODIFIED: best_train_profit도 elite에 맞게 필터링
+                best_train_profit = best_train_profit[elite_idx]
 
         gen_data = {
             "generation": gen_idx,
             "prescriptor_state_dict": prescriptor.state_dict(),
             "best_profit": best_profit,
             "best_chromosomes": best_chromosomes,
+            # ### MODIFIED: best_train_profit도 저장
+            "best_train_profit": best_train_profit,
         }
         
         train_fitness = calculate_fitness(train_metrics)
@@ -903,7 +919,8 @@ def generation_valid(data_1m,
         prescriptor = prescriptor.to(device)
         
         del probs
-    return best_chromosomes, best_profit
+    # ### MODIFIED: best_train_profit도 반환
+    return best_chromosomes, best_profit, best_train_profit
 
 
 # ---------------------------------------------------

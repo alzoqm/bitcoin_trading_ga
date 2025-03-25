@@ -2,7 +2,10 @@
 
 import numpy as np
 import pandas as pd
-import numba
+from numba import njit
+
+def log_transform(data):
+    return np.sign(data) * np.log1p(np.abs(data))
 
 def resample_data(data, timeframe):
     temp_data = data.copy()
@@ -31,12 +34,12 @@ def calculate_MA_data(data, window, mode='MA', extra_str=None):
         col_name = format_col_name(f'SMA_{window}', extra_str)
         relative_col_name = format_col_name(f'SMA_{window}_rel', extra_str)
         data[col_name] = data['Close'].rolling(window=window).mean()
-        data[relative_col_name] = (data['Close'] - data[col_name]) / data['Close'] * 100
+        data[relative_col_name] = log_transform((data['Close'] - data[col_name]) / data['Close'] * 100)
     elif mode == 'EMA':  # Exponential Moving Average
         col_name = format_col_name(f'EMA_{window}', extra_str)
         relative_col_name = format_col_name(f'EMA_{window}_rel', extra_str)
         data[col_name] = data['Close'].ewm(span=window, adjust=False).mean()
-        data[relative_col_name] = (data['Close'] - data[col_name]) / data['Close'] * 100
+        data[relative_col_name] = log_transform((data['Close'] - data[col_name]) / data['Close'] * 100)
     elif mode == 'WMA':  # Weighted Moving Average
         col_name = format_col_name(f'WMA_{window}', extra_str)
         relative_col_name = format_col_name(f'WMA_{window}_rel', extra_str)
@@ -44,7 +47,7 @@ def calculate_MA_data(data, window, mode='MA', extra_str=None):
         data[col_name] = data['Close'].rolling(window=window).apply(
             lambda x: np.dot(x, weights) / sum(weights), raw=True
         )
-        data[relative_col_name] = (data['Close'] - data[col_name]) / data['Close'] * 100
+        data[relative_col_name] = log_transform((data['Close'] - data[col_name]) / data['Close'] * 100)
     else:
         raise ValueError(f"Mode {mode} not recognized. Available modes: 'MA', 'EMA', 'WMA'")
     new_cols.append(col_name)
@@ -67,8 +70,8 @@ def calculate_ema_bollinger_bands(df, window=20, num_std=2, extra_str=None):
     
     df[upper_col] = ma + (std * num_std)
     df[lower_col] = ma - (std * num_std)
-    df[upper_col_rel] = (df[upper_col] - df['Close']) / df['Close'] * 100
-    df[lower_col_rel] = (df['Close'] - df[lower_col]) / df['Close'] * 100
+    df[upper_col_rel] = log_transform((df[upper_col] - df['Close']) / df['Close'] * 100)
+    df[lower_col_rel] = log_transform((df['Close'] - df[lower_col]) / df['Close'] * 100)
     
     new_cols.extend([upper_col, lower_col])
     relative_new_cols.extend([upper_col_rel, lower_col_rel])
@@ -83,7 +86,7 @@ def calculate_rsi(df, window=14, extra_str=None):
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
     rsi_col = format_col_name(f'RSI_{window}', extra_str)
-    df[rsi_col] = rsi - 50
+    df[rsi_col] = (rsi - 50) / 25
     new_cols.append(rsi_col)
     return df, new_cols
 
@@ -98,8 +101,8 @@ def calculate_macd(df, short_window=12, long_window=26, signal_window=9, extra_s
     macd_data = short_ema - long_ema
     df[macd_col] = macd_data
     df[signal_col] = df[macd_col].ewm(span=signal_window, adjust=False).mean()
-    df[macd_col] = df[macd_col] / df['Close'] * 100
-    df[signal_col] = df[signal_col] / df['Close'] * 100
+    df[macd_col] = log_transform(df[macd_col] / df['Close'] * 100)
+    df[signal_col] = log_transform(df[signal_col] / df['Close'] * 100)
     
     new_cols.extend([macd_col, signal_col])
     
@@ -112,7 +115,7 @@ def calculate_stochastic_oscillator(df, k_window=14, d_window=3, extra_str=None)
     k_col = format_col_name(f'%K_{k_window}', extra_str)
     d_col = format_col_name(f'%D_{d_window}', extra_str)
     
-    df[k_col] = 100 * ((df['Close'] - low_min) / (high_max - low_min)) - 50
+    df[k_col] = (100 * ((df['Close'] - low_min) / (high_max - low_min)) - 50) / 25
     df[d_col] = df[k_col].rolling(window=d_window).mean()
     
     new_cols.extend([k_col, d_col])
@@ -139,7 +142,7 @@ def calculate_adx(df, window=14, extra_str=None):
     adx = dx.rolling(window=window).mean()
     
     adx_col = format_col_name(f'ADX_{window}', extra_str)
-    df[adx_col] = adx
+    df[adx_col] = log_transform(adx) - 2.276703340200053
     new_cols.append(adx_col)
     
     return df, new_cols
@@ -194,117 +197,173 @@ def calculate_williams_r(df, window=14, extra_str=None):
     williams_r = (high_max - df['Close']) / (high_max - low_min) * 100
     
     wr_col = format_col_name(f'Williams_%R_{window}', extra_str)
-    df[wr_col] = williams_r - 50
+    df[wr_col] =(williams_r - 50) / 25
     new_cols.append(wr_col)
     
     return df, new_cols
 
-import numpy as np
-import pandas as pd
-import numba
-
-# Numba를 이용해 각 윈도우의 지원/저항을 계산하는 함수
-@numba.njit
-def compute_support_resistance_numba(volumes, lows, highs, avg_vol, window):
-    n = volumes.shape[0]
-    support = np.empty(n)
-    resistance = np.empty(n)
-    
-    # 초기 window-1 값은 NaN 처리
-    for i in range(window - 1):
-        support[i] = np.nan
-        resistance[i] = np.nan
-        
-    # 각 인덱스 i에 대해, window 크기만큼의 데이터를 확인
-    for i in range(window - 1, n):
-        start = i - window + 1
-        candidate_support = np.inf
-        candidate_resistance = -np.inf
-        found_candidate = False
-        
-        # 미리 계산해둔 rolling 평균값 (현재 윈도우의 avg)
-        current_avg = avg_vol[i]
-        fallback_support = np.inf
-        fallback_resistance = -np.inf
-        
-        # window 내에서 순회하며 후보와 fallback 계산
-        for j in range(start, i + 1):
-            # fallback: 조건과 무관하게 window 전체의 min(low)와 max(high)
-            if lows[j] < fallback_support:
-                fallback_support = lows[j]
-            if highs[j] > fallback_resistance:
-                fallback_resistance = highs[j]
-            # 후보 조건: 해당 캔들의 volume이 window의 평균 이상인 경우
-            if volumes[j] >= current_avg:
-                found_candidate = True
-                if lows[j] < candidate_support:
-                    candidate_support = lows[j]
-                if highs[j] > candidate_resistance:
-                    candidate_resistance = highs[j]
-        # 후보가 존재하면 후보의 값 사용, 없으면 전체 window의 fallback 값 사용
-        if found_candidate:
-            support[i] = candidate_support
-            resistance[i] = candidate_resistance
-        else:
-            support[i] = fallback_support
-            resistance[i] = fallback_resistance
-    return support, resistance
-
-def calculate_support_resistance_optimized(df, window=20, extra_str=None):
+@njit
+def update_histogram_add(hist, price, volume, bin_edges, alpha_power):
     """
-    OHLCV 데이터를 기반으로 rolling window 내에서 지지와 저항 레벨을 feature로 계산합니다.
-    - 각 window 내에서 평균 거래량 이상인 캔들을 후보로 선정하고,
-      * Support: 후보들의 최저 'Low'
-      * Resistance: 후보들의 최고 'High'
-    후보가 없으면 window 전체의 최솟값/최댓값을 사용합니다.
-    또한, 현재 'Close' 가격과의 백분율 차이를 feature로 추가합니다.
+    hist: 히스토그램(누적 거래량)을 저장할 1D array
+    price: 해당 봉의 typical price
+    volume: 해당 봉의 거래량
+    bin_edges: 히스토그램 구간 경계
+    alpha_power: 시간 가중을 고려할 때 곱할 값(예: alpha^(w-1-k))
     """
-    # 컬럼 이름 생성
-    def format_col_name(col_name, extra_str):
-        return f"{col_name}_{extra_str}" if extra_str else col_name
+    # 가격에 맞는 bin 인덱스 찾기
+    # np.searchsorted(bin_edges, price, side='right') - 1
+    idx = np.searchsorted(bin_edges, price) - 1
+    if idx < 0:
+        idx = 0
+    elif idx >= len(hist):
+        idx = len(hist) - 1
+    
+    # 가중치로 volume 반영
+    hist[idx] += volume * alpha_power
 
-    support_col = format_col_name(f"Support_{window}", extra_str)
-    resistance_col = format_col_name(f"Resistance_{window}", extra_str)
-    support_rel_col = format_col_name(f"Support_{window}_rel", extra_str)
-    resistance_rel_col = format_col_name(f"Resistance_{window}_rel", extra_str)
+@njit
+def update_histogram_sub(hist, price, volume, bin_edges, alpha_power):
+    """
+    오래된 봉 제거 시 hist에서 빼기
+    """
+    idx = np.searchsorted(bin_edges, price) - 1
+    if idx < 0:
+        idx = 0
+    elif idx >= len(hist):
+        idx = len(hist) - 1
     
-    n = len(df)
-    if n < window:
-        df[support_col] = np.nan
-        df[resistance_col] = np.nan
-        df[support_rel_col] = np.nan
-        df[resistance_rel_col] = np.nan
-        return df, [support_col, resistance_col, support_rel_col, resistance_rel_col]
+    hist[idx] -= volume * alpha_power
+    if hist[idx] < 0:
+        hist[idx] = 0  # 혹시 음수가 되면 0으로 보정
+
+@njit
+def find_poc(hist, bin_edges):
+    """
+    히스토그램 값이 최대인 bin을 찾아 그 구간의 중앙값을 반환
+    """
+    max_idx = 0
+    max_val = hist[0]
+    for i in range(1, len(hist)):
+        if hist[i] > max_val:
+            max_val = hist[i]
+            max_idx = i
+    # 구간 중앙값
+    bin_center = (bin_edges[max_idx] + bin_edges[max_idx+1]) / 2.0
+    return bin_center
+
+def calculate_sliding_volume_profile(
+    df,
+    window=20,
+    alpha=0.9,
+    bin_size=10,
+    global_min_price=None,
+    global_max_price=None,
+    extra_str=None
+):
+    """
+    고정 bin 범위를 사용한 슬라이딩(rolling) 방식 Volume Profile POC 계산
     
-    # 필요한 배열 추출
-    volumes = df['Volume'].to_numpy()
-    lows = df['Low'].to_numpy()
-    highs = df['High'].to_numpy()
-    close_prices = df['Close'].to_numpy()
+    df : pd.DataFrame 
+        - 'High', 'Low', 'Close', 'Volume' 컬럼이 있어야 함
+    window : int
+        - 몇 개의 봉을 롤링 윈도우로 사용할지
+    alpha : float
+        - 시간 가중(오래된 봉 감쇠). 1에 가까울수록 감쇠가 작고, 0.5처럼 작으면 오래된 봉은 급격히 작아짐
+    bin_size : float
+        - 가격 구간 간격
+    global_min_price, global_max_price : float, float
+        - None이면, df 전체의 최저/최고를 이용해 bin 범위 설정
+        - 특정 범위를 주면, 그 범위를 bin으로 사용
+    """
     
-    # rolling 평균 거래량 계산: 첫 window-1 인덱스는 NaN 처리
-    avg_vol = np.empty(n)
-    for i in range(n):
-        if i < window - 1:
-            avg_vol[i] = np.nan
-        else:
-            avg_vol[i] = np.mean(volumes[i - window + 1:i + 1])
+    # 1) 먼저 전체 데이터에 대한 전역 min/max 설정
+    if global_min_price is None:
+        global_min_price = df['Low'].min()
+    if global_max_price is None:
+        global_max_price = df['High'].max()
     
-    # Numba 함수 호출하여 지원과 저항 계산
-    support, resistance = compute_support_resistance_numba(volumes, lows, highs, avg_vol, window)
+    if global_min_price == global_max_price:
+        raise ValueError("최저가와 최고가가 동일하여 bin을 생성할 수 없습니다.")
     
-    # 현재 종가와의 상대적 백분율 차이 계산
-    support_rel = (close_prices - support) / close_prices * 100
-    resistance_rel = (resistance - close_prices) / close_prices * 100
+    # bin_edges 생성
+    # bin_edges 예: [100, 110, 120, ... , 200] 식으로
+    bin_edges = np.arange(global_min_price, global_max_price + bin_size, bin_size)
+    # 히스토그램 array (bin_edges의 길이 - 1)
+    hist = np.zeros(len(bin_edges) - 1, dtype=np.float64)
     
-    # DataFrame에 결과 컬럼 추가
-    df[support_col] = support
-    df[resistance_col] = resistance
-    df[support_rel_col] = support_rel
-    df[resistance_rel_col] = resistance_rel
+    # Typical price, volume, alpha_w (시간 가중용 보정값) 배열 미리 계산
+    # alpha_w[i] = alpha^(window - 1 - i상대위치) 같은 로직으로 구현 가능
+    # 여기서는 간단히: 가장 최근 봉일수록 alpha_power = alpha^0 = 1,
+    #                   오래된 봉일수록 alpha^(window-1) 형태
+    typical_prices = (df['High'] + df['Low'] + df['Close']) / 3.0
+    volumes = df['Volume'].values
     
-    new_cols = [support_col, resistance_col, support_rel_col, resistance_rel_col]
-    return df, new_cols
+    # “가장 최근 봉” = 가중치 alpha^0 = 1
+    # “w-1번째 봉(가장 오래된)” = alpha^(w-1)
+    alpha_powers = np.array([alpha ** p for p in range(window)], dtype=np.float64)
+    
+    # POC를 저장할 배열
+    poc_vals = [np.nan] * len(df)
+    
+    # 2) 초기 구간(처음 window개의 봉)에 대한 히스토그램 채우기
+    #    i=0이 가장 오래된, i=window-1이 가장 최신
+    if len(df) < window:
+        print("데이터 길이가 window보다 짧아 계산 불가.")
+        return df, []
+    
+    for k in range(window):
+        price = typical_prices[k]
+        volume = volumes[k]
+        # 오래된 봉일수록 alpha^(큰 값)
+        alpha_power = alpha_powers[window - 1 - k]
+        update_histogram_add(hist, price, volume, bin_edges, alpha_power)
+    
+    # 첫 POC 계산
+    poc_vals[window-1] = find_poc(hist, bin_edges)
+    
+    # 3) 슬라이딩
+    #    새 봉(i) 추가 & i-window 봉 제거
+    for i in range(window, len(df)):
+        # 추가
+        new_price = typical_prices[i]
+        new_volume = volumes[i]
+        update_histogram_add(hist, new_price, new_volume, bin_edges, alpha_powers[0])  
+        # (새로 들어온 봉은 "가장 최근"이므로 alpha^0 = 1)
+        
+        # 제거
+        old_price = typical_prices[i - window]
+        old_volume = volumes[i - window]
+        # 제거되는 봉은 window개 중 “가장 오래된” 것이었으므로 alpha^(window-1)
+        update_histogram_sub(hist, old_price, old_volume, bin_edges, alpha_powers[window - 1])
+        
+        # 이제 기존에 들어있던 것들의 alpha 가중치도 한 단계씩 “더 오래된 봉” 쪽으로 이동시켜야 함
+        # => hist 전체를 alpha로 곱하는 방식이 간단!
+        #    모든 bin을 alpha로 한번에 곱하면,
+        #    "가장 최근"이었던 건 alpha^1로, "가장 오래된"이었던 건 alpha^(w-1) -> alpha^w가 됨
+        hist *= alpha
+        
+        # POC 계산
+        poc_vals[i] = find_poc(hist, bin_edges)
+    
+    # DataFrame에 POC 컬럼 추가
+    poc_col_name = format_col_name(f'SlidingPoC_{window}', extra_str)
+    df[poc_col_name] = poc_vals
+    
+    return df, poc_col_name
+
+def calculate_rs(data_1d, data_1m, col_name):
+    # 1m 데이터의 날짜에 대해 1d 데이터의 전날 값을 사용하여 feature 생성
+    data_1m['Date'] = data_1m['Close time'].dt.date
+    data_1d['Date'] = data_1d['Close time'].dt.date
+    data_1d_shifted = data_1d.set_index('Date').shift(1).reset_index()
+
+    # 현재 가격 대비 POC의 상대적 거리
+    diff_col_name = 'SlidingPoC_diff'
+    data_1m = data_1m.merge(data_1d_shifted[['Date', col_name]], on='Date', how='left', suffixes=('', '_1d'))
+    data_1m[diff_col_name] = log_transform((data_1m['Close'] - data_1m[f'{col_name}']) / data_1m['Close'] * 100)
+
+    return data_1m, diff_col_name
 
 
 
@@ -320,14 +379,25 @@ def base_feature_fn(df, extra_str=None):
     high_low_diff_col = format_col_name('high_low_diff', extra_str)
     close_diff_col = format_col_name('close_diff', extra_str)
     
-    df[open_close_diff_col] = (df['Open'] - df['Close']) / df['Open'] * 100
-    df[open_high_diff_col] = (df['Open'] - df['High']) / df['Open'] * 100
-    df[open_low_diff_col] = (df['Open'] - df['Low']) / df['Open'] * 100
-    df[close_high_diff_col] = (df['Close'] - df['High']) / df['Close'] * 100
-    df[close_low_diff_col] = (df['Close'] - df['Low']) / df['Close'] * 100
-    df[high_low_diff_col] = (df['High'] - df['Low']) / df['High'] * 100
-    df[close_diff_col] = (df['Close'] - df['Close'].shift(1)) / df['Close'] * 100
-    
+    df[open_close_diff_col] = (df['Open'] - df['Close']) / df['Open']
+    df[open_high_diff_col] = (df['Open'] - df['High']) / df['Open']
+    df[open_low_diff_col] = (df['Open'] - df['Low']) / df['Open']
+    df[close_high_diff_col] = (df['Close'] - df['High']) / df['Close']
+    df[close_low_diff_col] = (df['Close'] - df['Low']) / df['Close']
+    df[high_low_diff_col] = (df['High'] - df['Low']) / df['High']
+    df[close_diff_col] = (df['Close'] - df['Close'].shift(1)) / df['Close']
+
+    # df[open_close_diff_col] = log_transform((df['Open'] - df['Close']) / df['Open'])
+    # df[open_high_diff_col] = log_transform((df['Open'] - df['High']) / df['Open'])
+    # df[open_low_diff_col] = log_transform((df['Open'] - df['Low']) / df['Open'])
+    # df[close_high_diff_col] = log_transform((df['Close'] - df['High']) / df['Close'])
+    # df[close_low_diff_col] = log_transform((df['Close'] - df['Low']) / df['Close'])
+    # df[high_low_diff_col] = log_transform((df['High'] - df['Low']) / df['High'])
+    # df[close_diff_col] = log_transform((df['Close'] - df['Close'].shift(1)) / df['Close'])
+
+    df['Volume'] = log_transform(df['Volume']) - 3.287480801178518
+
+
     base_feature_list.append(open_close_diff_col)
     base_feature_list.append(open_high_diff_col)
     base_feature_list.append(open_low_diff_col)
@@ -376,5 +446,4 @@ def cyclic_encode_fn(df, timestamp_col='Open time', cycle='minute_of_day'):
     
     return df, new_columns
 
-def log_transform(data):
-    return np.sign(data) * np.log1p(np.abs(data))
+
